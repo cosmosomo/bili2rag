@@ -26,6 +26,7 @@ logs/
 .tmp/
 target*.txt
 targets*.txt
+bin/
 
 # OS / editor
 .DS_Store

@@ -36,6 +36,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+ffmpeg = ["imageio-ffmpeg>=0.4.9"]
 
 [project.scripts]
 bili2rag = "bilibili_get.cli:main"

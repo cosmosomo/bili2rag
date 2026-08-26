@@ -306,7 +306,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
                 if "音频" in msg or "audio" in msg.lower():
                     _print_utf8(
                         f"[HINT] {bvid} 音频缺失常见原因：412 反爬（运行 python -m pip install -U yt-dlp 后重试）/"
-                        "充电专属或已删除视频/网络抖动。采集产物已保留在 {bvid_dir}"
+                        f"充电专属或已删除视频/网络抖动。采集产物已保留在 {bvid_dir}"
                     )
                 if args.fail_fast:
                     return 1

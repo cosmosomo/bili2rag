@@ -26,7 +26,13 @@ cd bili2rag
 pip install -e .            # or: pip install -e ".[dev]" for tests
 ```
 
-Requirements: Python ≥ 3.10, [ffmpeg] on PATH (audio extraction). A GPU is optional (`--asr-device cuda --asr-compute float16`).
+Requirements: Python ≥ 3.10 and ffmpeg for audio extraction — any one of:
+
+- ffmpeg on `PATH` (winget/choco/apt), or
+- drop `ffmpeg(.exe)` + `ffprobe(.exe)` into a `bin/` folder at the repo root (portable, git-ignored), or
+- `pip install -e ".[ffmpeg]"` (pulls `imageio-ffmpeg`).
+
+A GPU is optional (`--asr-device cuda --asr-compute float16`).
 
 ## Quick start
 
@@ -96,6 +102,4 @@ Use in accordance with Bilibili's Terms of Service and the laws of your jurisdic
 
 ## License
 
-[MIT](LICENSE)
-
-[ffmpeg]: https://ffmpeg.org/download.html
+MIT

@@ -275,11 +275,31 @@ def _download_audio_via_playurl_api(
 
 
 def _ffmpeg_location_dir() -> Optional[str]:
-    # try BiliNote ffmpeg bundle
-    base = Path(__file__).resolve().parents[1] / "BiliNote_win_v1.1.1" / "bin"
-    if base.exists() and (base / "ffmpeg.exe").exists():
-        return str(base)
-    # fallback: None (expect system ffmpeg)
+    """Locate ffmpeg for yt-dlp postprocessing.
+
+    Search order (first hit wins):
+    1. ffmpeg on system PATH (shutil.which)
+    2. <repo>/bin/            — drop ffmpeg(.exe)+ffprobe(.exe) here for a portable setup
+    3. imageio-ffmpeg package — pip-installed ffmpeg (no ffprobe, still covers extraction)
+    4. legacy sibling BILIBILI_GET bundle (local dev compatibility)
+    """
+    import shutil
+
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return str(Path(exe).parent)
+
+    repo_bin = Path(__file__).resolve().parents[1] / "bin"
+    if (repo_bin / "ffmpeg.exe").exists() or (repo_bin / "ffmpeg").exists():
+        return str(repo_bin)
+
+    try:
+        import imageio_ffmpeg  # type: ignore
+
+        return str(Path(imageio_ffmpeg.get_ffmpeg_exe()).parent)
+    except Exception:
+        pass
+
     return None
 
 
