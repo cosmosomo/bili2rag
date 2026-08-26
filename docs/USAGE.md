@@ -64,15 +64,12 @@ library/_exports/txt/
 
 ## 2. Cookie 准备（决定可访问内容）
 
-把浏览器导出的 Cookie 保存为 `cookie.txt`（本目录下），支持：
-- Netscape cookies 文件（推荐，`# Netscape HTTP Cookie File` 开头）
-- 单行 Header 样式：`name=value; name2=value2; ...`
+> 功能 × Cookie 依赖矩阵、获取步骤、失效症状速查：见 README「Cookie & access matrix」节（单一事实源，此处不重复）。
 
-脚本会在采集阶段自动生成 yt-dlp 可用的 Netscape cookiefile（避免 “Passing cookies as a header is deprecated” 警告）。
-
-注意：
-- 部分字幕/清晰度/评论内容需要登录态（`SESSDATA` 等）。
-- **充电专属/付费内容** 可能拿不到音频/视频流（会失败；元信息/评论可能仍可抓到）。
+要点：
+- 保存为项目根目录 `cookie.txt`，支持 Netscape / 单行 Header 两种格式（详见 `cookie.txt.example`）
+- 公开视频、ASR、导出、doctor **不需要** cookie；space 发现/搜索**必须要有效** `SESSDATA`
+- cookie 失效时 space 类接口报误导性的 `-352`；工具启动会自动预检并提示
 
 ## 3. 低熵入口：单视频一键跑通（最常用）
 

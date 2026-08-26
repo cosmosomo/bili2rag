@@ -59,7 +59,33 @@ python scripts/doctor.py                    # find missing transcripts/audio/emp
 python scripts/export_txt_bundle.py --uploader "某UP主" --with-header --concat-all
 ```
 
-Full walkthrough (topics, snapshots, PBP, catalogs, category navigation, FAQ): **[docs/USAGE.md](docs/USAGE.md)**.
+Full walkthrough (topics, snapshots, PBP, catalogs, category navigation, FAQ): **[docs/USAGE.md](docs/USAGE.md)**. Architecture & design decisions: **[docs/DESIGN.md](docs/DESIGN.md)**.
+
+## Cookie & access matrix
+
+Not every feature needs a cookie. Check before troubleshooting:
+
+| Capability | No cookie / stale cookie |
+|---|---|
+| `run` on public videos (audio / danmaku / metadata / cover) | ✅ works |
+| ASR, `repair`, `doctor`, export/catalog/nav tools | ✅ works (pure local) |
+| Comments snapshot | ✅ best-effort (first-page hot comments + total count) |
+| `grab-uploader` (space discovery), keyword `search` | ❌ requires valid `SESSDATA`; stale cookie aborts early with a hint |
+| Member-only / 充电专属 media streams | ❌ explicit failure even with valid cookie (never faked) |
+| CC/AI subtitles & higher resolutions on some videos | ⚠️ partially requires login |
+
+### Getting cookies (3 steps)
+
+1. Log in to [bilibili.com](https://www.bilibili.com) in your browser (avatar visible top-right).
+2. Use an extension such as **"Get cookies.txt"** and export **while on a bilibili.com tab** (exporting from another site's tab gives you the wrong cookies).
+3. Save as `cookie.txt` in the repo root. It **must contain `SESSDATA=…`**; both header-style and Netscape formats are accepted (see `cookie.txt.example`).
+
+### When a cookie goes stale
+
+- Symptoms: space/search APIs fail with a misleading `-352` "risk control" error, while `run` keeps working but prints `[COOKIE WARN]`.
+- Cause: `SESSDATA` expired, or invalidated by logging in again elsewhere (single-device policy).
+- Fix: re-export and overwrite `cookie.txt`. Nothing else to clean up.
+- ⚠️ `SESSDATA` is a login credential. `cookie.txt` is git-ignored; never share it.
 
 ## Pipeline / packages
 
