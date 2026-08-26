@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.collect_targets import _extract_bvids
+from bilibili_get.orchestrate import extract_bvids_from_lines
 
 
 def test_extract_bvids_dedupe_and_parse() -> None:
@@ -10,6 +10,5 @@ def test_extract_bvids_dedupe_and_parse() -> None:
         "noise BV9ZZZZZZZZZ and BV9ZZZZZZZZZ",
         "no bvid here",
     ]
-    got = _extract_bvids(lines)
+    got = [it.bvid for it in extract_bvids_from_lines(lines)]
     assert got == ["BV1ABCDEF123", "BV9ZZZZZZZZZ"]
-

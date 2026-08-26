@@ -30,6 +30,32 @@ def _utc_now_compact() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
+def _add_batch_pipeline_args(parser: argparse.ArgumentParser) -> None:
+    """Pipeline flags shared by grab-uploader / grab-targets (fed to the engine)."""
+    parser.add_argument("--cookies", default="cookie.txt")
+    parser.add_argument("--proxy", default=None)
+    parser.add_argument("--output-root", default="output")
+    parser.add_argument("--library-root", default="library")
+    parser.add_argument("--download", default="audio,subtitles,cover")
+    parser.add_argument("--comment-pages", type=int, default=1)
+    parser.add_argument("--pbp", action="store_true", help="抓取高能进度条（PBP）到 json/pbp.json")
+    parser.add_argument("--snapshots", default="smart", help="none|smart|auto|秒列表（如 10,60,120）")
+    parser.add_argument("--snapshot-k", type=int, default=5)
+    parser.add_argument("--no-asr", action="store_true")
+    parser.add_argument("--no-export", action="store_true")
+    parser.add_argument("--asr-device", default="cpu")
+    parser.add_argument("--asr-compute", default="int8")
+    parser.add_argument("--asr-model", default="auto")
+    parser.add_argument("--asr-lang", default=None)
+    parser.add_argument("--if-exists", choices=["fail", "skip", "overwrite"], default="skip")
+    parser.add_argument("--prune-output", action="store_true", help="导出成功后删除 output/<bvid>/")
+    parser.add_argument("--between-sleep", type=float, default=0.0)
+    parser.add_argument("--fail-fast", action="store_true")
+    parser.add_argument("--new-limit", type=int, default=0, help="本次最多处理多少条新增（0=不限制）")
+    parser.add_argument("--include-unavailable", action="store_true", help="重试已标记 unavailable 的视频")
+    parser.add_argument("--out-dir", default="discoveries")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Bilibili low-entropy entrypoint: run (URL→harvest→ASR→export), search, uploader, export."
@@ -130,6 +156,28 @@ def build_parser() -> argparse.ArgumentParser:
     asr_up.add_argument("--asr-lang", default=None)
     asr_up.add_argument("--process-limit", type=int, default=0, help="本次最多处理多少个缺失转写的 bvid（0=不限制）")
     asr_up.add_argument("--out-dir", default="discoveries", help="进度/失败记录输出目录（默认 discoveries/）")
+
+    grab_up = sub.add_parser(
+        "grab-uploader",
+        help="增量抓取某 UP 主新投稿（space 发现 → 引擎逐条子进程采集）",
+    )
+    grab_up.add_argument("--seed-bvid", default="", help="从种子 BV 推导 mid（与 --mid 二选一）")
+    grab_up.add_argument("--mid", type=int, default=0, help="UP 主 mid（与 --seed-bvid 二选一）")
+    grab_up.add_argument("--order", default="pubdate")
+    grab_up.add_argument("--tid", type=int, default=0)
+    grab_up.add_argument("--keyword", default="")
+    grab_up.add_argument("--ps", type=int, default=30)
+    grab_up.add_argument("--page-sleep", type=float, default=0.5)
+    grab_up.add_argument("--discover-limit", type=int, default=50, help="发现最近 N 条投稿（0=不限制）")
+    _add_batch_pipeline_args(grab_up)
+
+    grab_t = sub.add_parser(
+        "grab-targets",
+        help="按清单批量抓取（targets 文件 → 引擎逐条子进程采集；主题收集用 --name 命名）",
+    )
+    grab_t.add_argument("--targets-file", required=True, help="包含 URL/BV 的文本文件（任意格式）")
+    grab_t.add_argument("--name", default="", help="运行名（用于 discoveries 目录命名）")
+    _add_batch_pipeline_args(grab_t)
 
     return parser
 
@@ -394,6 +442,145 @@ def _delegate_to_bilibili_search(argv: List[str]) -> int:
         return code
 
 
+def _batch_config_from_args(args: argparse.Namespace, run_dir: Path) -> "BatchConfig":
+    from .orchestrate import BatchConfig
+
+    return BatchConfig(
+        run_dir=run_dir,
+        cookies=args.cookies,
+        proxy=args.proxy,
+        output_root=args.output_root,
+        library_root=args.library_root,
+        download=args.download,
+        comment_pages=int(args.comment_pages),
+        pbp=bool(args.pbp),
+        snapshots=str(args.snapshots),
+        snapshot_k=int(args.snapshot_k),
+        no_asr=bool(args.no_asr),
+        no_export=bool(args.no_export),
+        asr_device=args.asr_device,
+        asr_compute=args.asr_compute,
+        asr_model=args.asr_model,
+        asr_lang=args.asr_lang,
+        if_exists=args.if_exists,
+        prune_output=bool(args.prune_output),
+        between_sleep=float(args.between_sleep),
+        fail_fast=bool(args.fail_fast),
+        new_limit=int(args.new_limit),
+        include_unavailable=bool(args.include_unavailable),
+    )
+
+
+def _grab_uploader_cmd(args: argparse.Namespace) -> int:
+    if bool(args.seed_bvid) == bool(args.mid):
+        _print_utf8("请指定 --seed-bvid 或 --mid（二选一）")
+        return 2
+
+    from bilibili_library.naming import sanitize_component
+    from bilibili_search.seed import fetch_owner_info_by_bvid
+    from bilibili_search.session import build_web_session
+    from bilibili_search.space import list_space_videos
+    from bilibili_search.wbi import extract_wbi_keys_from_nav_json
+
+    from .orchestrate import BatchItem, run_batch
+
+    cookiefile = Path(args.cookies)
+    if cookiefile.exists() and _warn_if_cookie_stale(cookiefile, args.proxy):
+        _print_utf8("space 发现接口依赖登录态，已中止。请先更新 cookie.txt 再重试。")
+        return 2
+    sess, cookie_brief = build_web_session(cookiefile if cookiefile.exists() else None, proxy=args.proxy)
+
+    owner_mid = int(args.mid or 0)
+    owner_name = str(owner_mid)
+    if args.seed_bvid:
+        owner = fetch_owner_info_by_bvid(sess, args.seed_bvid.strip())
+        owner_mid = owner.mid
+        owner_name = owner.name
+
+    nav = sess.get("https://api.bilibili.com/x/web-interface/nav", timeout=15)
+    nav.raise_for_status()
+    keys = extract_wbi_keys_from_nav_json(nav.json())
+
+    items_found = list_space_videos(
+        sess,
+        keys,
+        mid=owner_mid,
+        order=args.order,
+        tid=int(args.tid),
+        keyword=args.keyword,
+        limit=max(int(args.discover_limit), 0),
+        max_pages=0,
+        page_sleep=max(float(args.page_sleep), 0.0),
+        ps=max(int(args.ps), 1),
+    )
+    items = [BatchItem(bvid=it.bvid, title=it.title) for it in items_found]
+
+    safe_owner = sanitize_component(owner_name or str(owner_mid), max_len=60)
+    safe_kw = sanitize_component(args.keyword, max_len=60) if args.keyword else "all"
+    run_dir = Path(args.out_dir) / f"{_utc_now_compact()}_up_{owner_mid}_{safe_owner}_kw_{safe_kw}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    import json as _json
+
+    (run_dir / "targets.txt").write_text(
+        "\n".join(f"【{it.title}】https://www.bilibili.com/video/{it.bvid}" for it in items) + ("\n" if items else ""),
+        encoding="utf-8",
+    )
+    (run_dir / "meta.json").write_text(
+        _json.dumps(
+            {
+                "uploader": {"mid": owner_mid, "name": owner_name},
+                "keyword": args.keyword,
+                "order": args.order,
+                "returned_items": len(items),
+                "cookie_mode": getattr(cookie_brief, "mode", None),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _print_utf8(f"[DISCOVER] up={owner_name} mid={owner_mid} returned={len(items)} dir={run_dir}")
+
+    report = run_batch(items, _batch_config_from_args(args, run_dir))
+    return report.exit_code()
+
+
+def _grab_targets_cmd(args: argparse.Namespace) -> int:
+    from .orchestrate import extract_bvids_from_lines, run_batch
+
+    targets_path = Path(args.targets_file)
+    if not targets_path.exists():
+        _print_utf8(f"未找到 targets 文件：{targets_path}")
+        return 2
+    lines = targets_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    items = extract_bvids_from_lines(lines)
+    if not items:
+        _print_utf8("targets 文件中未解析到任何 BV 号")
+        return 2
+
+    name = str(args.name).strip() or targets_path.stem
+    run_dir = Path(args.out_dir) / f"{_utc_now_compact()}_collect_{name}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    import json as _json
+
+    (run_dir / "meta.json").write_text(
+        _json.dumps(
+            {"name": name, "targets_count": len(items), "targets_file": str(targets_path)},
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _print_utf8(f"[COLLECT] name={name} targets={len(items)} dir={run_dir}")
+
+    report = run_batch(items, _batch_config_from_args(args, run_dir))
+    return report.exit_code()
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -402,6 +589,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(_run_cmd(args))
     if args.cmd == "export":
         sys.exit(_export_cmd(args))
+    if args.cmd == "grab-uploader":
+        sys.exit(_grab_uploader_cmd(args))
+    if args.cmd == "grab-targets":
+        sys.exit(_grab_targets_cmd(args))
     if args.cmd == "search":
         # Delegate to existing CLI to keep behavior consistent.
         sub_argv: List[str] = ["pipeline" if args.pipeline else "search"]
