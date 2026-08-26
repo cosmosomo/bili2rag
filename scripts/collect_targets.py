@@ -190,7 +190,37 @@ def main(argv: Optional[List[str]] = None) -> None:
     ok: List[str] = []
     failures: List[Dict[str, Any]] = []
 
+    from bilibili_library.completion import (
+        append_failure,
+        classify,
+        find_video_dir,
+        mark_unavailable,
+    )
+
+    library_root = Path(args.library_root)
+    run_id = run_dir.name
+
+    _unavailable_patterns = ("-404", "-403", "404 Not Found", "啥都木有", "稿件不可见", "视频不存在")
+
+    def _log_says_unavailable(path: Path) -> bool:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return False
+        return any(p in text[-20000:] for p in _unavailable_patterns)
+
     for bvid in targets:
+        if args.if_exists == "skip":
+            vdir = find_video_dir(library_root, bvid)
+            state = classify(vdir)
+            if state == "ok":
+                _print_utf8(f"[SKIP] {bvid} already done")
+                continue
+            if state == "no_transcript_with_audio":
+                append_failure(library_root, bvid=bvid, stage="partial_asr", error="audio present, transcript missing (await repair)", run_id=run_id)
+                _print_utf8(f"[SKIP] {bvid} partial (has audio, no transcript) -> repair")
+                continue
+
         _print_utf8(f"[RUN] {bvid}")
         log_path = logs_dir / f"{bvid}.log"
         cmd = _build_run_cmd(args, bvid)
@@ -199,6 +229,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 p = subprocess.run(cmd, cwd=str(repo_dir), stdout=f, stderr=subprocess.STDOUT)
         except Exception as e:
             failures.append({"bvid": bvid, "stage": "subprocess_start", "error": str(e), "cmd": cmd})
+            append_failure(library_root, bvid=bvid, stage="subprocess_start", error=str(e), run_id=run_id)
             _print_utf8(f"[FAIL] start {bvid}: {e}")
             if args.fail_fast:
                 raise SystemExit(1)
@@ -206,6 +237,11 @@ def main(argv: Optional[List[str]] = None) -> None:
 
         if p.returncode != 0:
             failures.append({"bvid": bvid, "stage": "run", "returncode": p.returncode, "log": str(log_path)})
+            if _log_says_unavailable(log_path):
+                mark_unavailable(library_root, bvid, reason=f"auto: returncode={p.returncode} (404/403 pattern)")
+                append_failure(library_root, bvid=bvid, stage="unavailable", error=f"returncode={p.returncode}", run_id=run_id)
+            else:
+                append_failure(library_root, bvid=bvid, stage="run", error=f"returncode={p.returncode} log={log_path}", run_id=run_id)
             _print_utf8(f"[FAIL] {bvid} returncode={p.returncode} log={log_path}")
             if args.fail_fast:
                 raise SystemExit(p.returncode)

@@ -129,10 +129,32 @@ def _build_prune_output_exported_cmd(args: argparse.Namespace) -> List[str]:
     ]
 
 
+# Conservative patterns: only explicit not-found / permission errors may mark a
+# video unavailable. Transient network failures must NOT pin a permanent state.
+_UNAVAILABLE_PATTERNS = ("-404", "-403", "404 Not Found", "啥都木有", "稿件不可见", "视频不存在")
+
+
+def _log_says_unavailable(log_path: Path) -> bool:
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return False
+    tail = text[-20000:]
+    return any(p in tail for p in _UNAVAILABLE_PATTERNS)
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     repo_dir = Path(__file__).resolve().parents[1]  # .../BILIBILI_GET
     if str(repo_dir) not in sys.path:
         sys.path.insert(0, str(repo_dir))
+
+    from bilibili_library.completion import (
+        append_failure,
+        classify,
+        find_video_dir,
+        is_done,
+        mark_unavailable,
+    )
 
     parser = argparse.ArgumentParser(
         description=(
@@ -276,6 +298,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     uploader_dir = sanitize_component(owner_name or str(owner_mid), max_len=60)
     library_root = Path(args.library_root)
     already_exported = _discover_exported_bvids(library_root, uploader_dir)
+    run_id = run_dir.name
 
     processed: List[str] = []
     failures: List[Dict[str, Any]] = []
@@ -305,9 +328,19 @@ def main(argv: Optional[List[str]] = None) -> None:
         bvid = str(it["bvid"])
         title = str(it.get("title") or "")
 
-        if args.if_exists == "skip" and bvid in already_exported:
-            _print_utf8(f"[SKIP] {bvid} already exported")
-            continue
+        if args.if_exists == "skip":
+            vdir = find_video_dir(library_root, bvid)
+            state = classify(vdir)
+            if state == "ok":
+                _print_utf8(f"[SKIP] {bvid} already done")
+                continue
+            if state == "no_transcript_with_audio":
+                # Rule E: batches never re-harvest what repair can fix in place.
+                append_failure(
+                    library_root, bvid=bvid, stage="partial_asr", error="audio present, transcript missing (await repair)", title=title, run_id=run_id
+                )
+                _print_utf8(f"[SKIP] {bvid} partial (has audio, no transcript) -> repair")
+                continue
         if args.new_limit and len(processed) >= int(args.new_limit):
             _print_utf8(f"[STOP] reached --new-limit={args.new_limit} (processed_ok={len(processed)})")
             break
@@ -322,6 +355,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 p = subprocess.run(cmd, cwd=str(repo_dir), stdout=f, stderr=subprocess.STDOUT)
         except Exception as e:
             failures.append({"bvid": bvid, "stage": "subprocess_start", "error": str(e), "cmd": cmd})
+            append_failure(library_root, bvid=bvid, stage="subprocess_start", error=str(e), title=title, run_id=run_id)
             _print_utf8(f"[FAIL] start {bvid}: {e}")
             write_progress("subprocess_start_fail", current_bvid=bvid)
             if args.fail_fast:
@@ -335,6 +369,11 @@ def main(argv: Optional[List[str]] = None) -> None:
             exported_now = _discover_exported_bvids(library_root, uploader_dir)
             out_bvid_dir = (Path(args.output_root) / bvid).resolve()
             if bvid in exported_now:
+                if classify(find_video_dir(library_root, bvid)) != "ok":
+                    append_failure(
+                        library_root, bvid=bvid, stage="partial_asr",
+                        error=f"returncode={p.returncode}, salvaged without transcript", title=title, run_id=run_id,
+                    )
                 _print_utf8(f"[SALVAGE] {bvid} returncode={p.returncode} but already exported; continue")
                 processed.append(bvid)
                 write_progress("salvage_already_exported_ok", current_bvid=bvid)
@@ -356,6 +395,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                             "log": str(log_path),
                         }
                     )
+                    append_failure(library_root, bvid=bvid, stage="salvage_export", error=str(e), title=title, run_id=run_id)
                     _print_utf8(f"[FAIL] salvage {bvid}: {e}")
                     write_progress("salvage_fail", current_bvid=bvid)
                     if args.fail_fast:
@@ -364,11 +404,22 @@ def main(argv: Optional[List[str]] = None) -> None:
 
                 exported_now2 = _discover_exported_bvids(library_root, uploader_dir)
                 if bvid in exported_now2:
+                    if classify(find_video_dir(library_root, bvid)) != "ok":
+                        append_failure(
+                            library_root, bvid=bvid, stage="partial_asr",
+                            error=f"returncode={p.returncode}, salvaged without transcript", title=title, run_id=run_id,
+                        )
                     processed.append(bvid)
                     write_progress("salvage_export_ok", current_bvid=bvid)
                     continue
 
             failures.append({"bvid": bvid, "stage": "subprocess", "returncode": p.returncode, "log": str(log_path)})
+            if _log_says_unavailable(log_path):
+                mark_unavailable(library_root, bvid, reason=f"auto: returncode={p.returncode} (404/403 pattern)")
+                append_failure(library_root, bvid=bvid, stage="unavailable", error=f"returncode={p.returncode}", title=title, run_id=run_id)
+                _print_utf8(f"[UNAVAILABLE] {bvid} marked (404/403); will skip in future runs")
+            else:
+                append_failure(library_root, bvid=bvid, stage="subprocess", error=f"returncode={p.returncode} log={log_path}", title=title, run_id=run_id)
             _print_utf8(f"[FAIL] {bvid} returncode={p.returncode} log={log_path}")
             write_progress("subprocess_fail", current_bvid=bvid)
             if args.fail_fast:

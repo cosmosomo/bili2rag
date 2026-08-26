@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-_BV_RE = re.compile(r"(BV[0-9A-Za-z]{10})$")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-AUDIO_NAMES = ("audio.mp3", "audio.m4a")
+from bilibili_library.completion import (  # noqa: E402
+    extract_bvid_from_dirname,
+    has_audio,
+    has_transcript,
+)
+
 SKIP_PREFIXES = ("_", ".")
 
 
@@ -19,41 +23,15 @@ def _print_utf8(line: str) -> None:
 
 
 def _extract_bvid(dirname: str) -> Optional[str]:
-    m = _BV_RE.search(dirname.strip())
-    return m.group(1) if m else None
+    return extract_bvid_from_dirname(dirname)
 
 
 def _has_asr(video_dir: Path) -> bool:
-    if (video_dir / "asr" / "transcript.txt").exists():
-        return True
-    if (video_dir / "asr" / "transcript_all.txt").exists():
-        return True
-    pages_dir = video_dir / "pages"
-    if pages_dir.is_dir():
-        for pdir in pages_dir.iterdir():
-            if pdir.is_dir() and (
-                (pdir / "asr" / "transcript.txt").exists() or (pdir / "asr" / "transcript_all.txt").exists()
-            ):
-                return True
-    return False
+    return has_transcript(video_dir)
 
 
 def _has_audio(video_dir: Path) -> bool:
-    for name in AUDIO_NAMES:
-        if (video_dir / name).exists():
-            return True
-    pages_dir = video_dir / "pages"
-    if pages_dir.is_dir():
-        for pdir in pages_dir.iterdir():
-            if not pdir.is_dir():
-                continue
-            for name in AUDIO_NAMES:
-                if (pdir / name).exists():
-                    return True
-            for f in pdir.iterdir():
-                if f.is_file() and f.suffix.lower() in (".mp3", ".m4a"):
-                    return True
-    return False
+    return has_audio(video_dir)
 
 
 def _comments_state(video_dir: Path) -> str:
