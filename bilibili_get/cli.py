@@ -1,0 +1,627 @@
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from bilibili_asr.asr import ASRConfig, transcribe_bvid_dir
+from bilibili_harvester.cli import harvest_one
+from bilibili_harvester.utils import ensure_dir, extract_bvid, extract_targets
+from bilibili_library.exporter import export_bvid, iter_bvid_dirs
+
+from .pipeline_state import load_or_create_state, set_stage, stage_succeeded
+
+
+def _print_utf8(line: str) -> None:
+    sys.stdout.buffer.write((line + "\n").encode("utf-8", errors="replace"))
+
+
+def _append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def _utc_now_compact() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Bilibili low-entropy entrypoint: run (URL→harvest→ASR→export), search, uploader, export."
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    run = sub.add_parser("run", help="URL/BV → 采集（音频/字幕/评论/弹幕）→ ASR → 导出可读命名目录")
+    run.add_argument("--url", action="append", default=[], help="URL/BV（可重复），例如 BV15JqABoEvj")
+    run.add_argument("--targets", default=None, help="目标列表文件路径（每行 URL/BV，行内可带标题）")
+    run.add_argument("--cookies", default="cookie.txt", help="Cookie 文件路径（默认 cookie.txt）")
+    run.add_argument("--proxy", default=None, help="HTTP(S) 代理，如 http://127.0.0.1:7890")
+    run.add_argument("--output-root", default="output", help="采集输出根目录（默认 output）")
+    run.add_argument("--library-root", default="library", help="导出根目录（默认 library）")
+    run.add_argument("--download", default="audio,subtitles,cover", help="采集下载项：video,audio,subtitles,cover,none")
+    run.add_argument("--comment-pages", type=int, default=1, help="评论抓取页数（默认 1）")
+    run.add_argument("--pbp", action="store_true", help="抓取高能进度条（PBP）并保存到 json/pbp.json")
+    run.add_argument(
+        "--snapshots",
+        default="smart",
+        help=(
+            "抓取视频快照：none|smart|auto|秒列表（如 10,60,120）。"
+            "smart 会在标题含“导图/思维导图”时自动开启截图；auto 会根据 PBP 峰值自动选点（缺峰值会均匀取点）。"
+        ),
+    )
+    run.add_argument("--snapshot-k", type=int, default=5, help="--snapshots auto 时选取的峰值数量（默认 5）")
+    run.add_argument("--asr", action="store_true", help="启用 ASR（默认启用；配合 --no-asr 可关闭）")
+    run.add_argument("--no-asr", action="store_true", help="关闭 ASR（仅采集+可选导出）")
+    run.add_argument("--export", action="store_true", help="启用导出（默认启用；配合 --no-export 可关闭）")
+    run.add_argument("--no-export", action="store_true", help="关闭导出（仅采集+可选 ASR）")
+    run.add_argument("--if-exists", choices=["fail", "skip", "overwrite"], default="skip", help="导出目录已存在时策略")
+    run.add_argument("--prune-output", action="store_true", help="导出成功后删除 output/<bvid>/，节省空间（以 library/ 为唯一真源）")
+    run.add_argument("--asr-device", default="cpu", help="cpu|cuda（默认 cpu）")
+    run.add_argument("--asr-compute", default="int8", help="int8|float16|float32|auto（默认 int8）")
+    run.add_argument("--asr-model", default="auto", help="auto|模型名(base/small/...)|本地模型目录路径")
+    run.add_argument("--asr-lang", default=None, help="可选：语言代码（如 zh、en）")
+    run.add_argument("--fail-fast", action="store_true", help="遇到失败立即停止（默认继续处理并最后返回非零码）")
+    run.add_argument("--resume", action="store_true", help="跳过状态成功且产物仍存在的 harvest、ASR、export 阶段")
+
+    export = sub.add_parser("export", help="将 output/<bvid>/ 导出为可读命名目录（library/）")
+    export.add_argument("--output-root", default="output")
+    export.add_argument("--library-root", default="library")
+    export.add_argument("--bvid", action="append", default=[], help="目标 bvid，可重复传入")
+    export.add_argument("--all", action="store_true", help="导出 output-root 下全部 bvid 目录")
+    export.add_argument("--if-exists", choices=["fail", "skip", "overwrite"], default="skip")
+
+    search = sub.add_parser("search", help="关键词搜索并导出 targets/results（或 pipeline）")
+    search.add_argument("--keyword", required=True)
+    search.add_argument("--order", default="click")
+    search.add_argument("--limit", type=int, default=50)
+    search.add_argument("--cookies", default="cookie.txt")
+    search.add_argument("--proxy", default=None)
+    search.add_argument("--out-dir", default="discoveries")
+    search.add_argument("--pipeline", action="store_true", help="启用：采集→ASR→导出")
+    search.add_argument("--output-root", default="output")
+    search.add_argument("--library-root", default="library")
+    search.add_argument("--download", default="audio,subtitles,cover")
+    search.add_argument("--comment-pages", type=int, default=1)
+    search.add_argument("--asr-device", default="cpu")
+    search.add_argument("--asr-compute", default="int8")
+    search.add_argument("--asr-model", default="auto")
+    search.add_argument("--asr-lang", default=None)
+    search.add_argument("--if-exists", choices=["fail", "skip", "overwrite"], default="skip")
+
+    up = sub.add_parser("uploader", help="列出某 UP 的投稿视频并导出 targets/results（或 pipeline）")
+    up.add_argument("--seed-bvid", default="", help="从种子 BV 推导 mid（与 --mid 二选一）")
+    up.add_argument("--mid", type=int, default=0, help="UP 主 mid（与 --seed-bvid 二选一）")
+    up.add_argument("--limit", type=int, default=50)
+    up.add_argument("--order", default="pubdate")
+    up.add_argument("--keyword", default="")
+    up.add_argument("--cookies", default="cookie.txt")
+    up.add_argument("--proxy", default=None)
+    up.add_argument("--out-dir", default="discoveries")
+    up.add_argument("--pipeline", action="store_true", help="启用：采集→ASR→导出")
+    up.add_argument("--output-root", default="output")
+    up.add_argument("--library-root", default="library")
+    up.add_argument("--download", default="audio,subtitles,cover")
+    up.add_argument("--comment-pages", type=int, default=1)
+    up.add_argument("--asr-device", default="cpu")
+    up.add_argument("--asr-compute", default="int8")
+    up.add_argument("--asr-model", default="auto")
+    up.add_argument("--asr-lang", default=None)
+    up.add_argument("--if-exists", choices=["fail", "skip", "overwrite"], default="skip")
+
+    asr_up = sub.add_parser("asr-uploader", help="对某 UP 的最近 N 条（或指定 mid）补齐 ASR，并覆盖导出到 library/")
+    asr_up.add_argument("--seed-bvid", default="", help="从种子 BV 推导 mid（与 --mid 二选一）")
+    asr_up.add_argument("--mid", type=int, default=0, help="UP 主 mid（与 --seed-bvid 二选一）")
+    asr_up.add_argument("--limit", type=int, default=50, help="处理最近 N 条（0=不限制）")
+    asr_up.add_argument("--order", default="pubdate")
+    asr_up.add_argument("--keyword", default="")
+    asr_up.add_argument("--cookies", default="cookie.txt")
+    asr_up.add_argument("--proxy", default=None)
+    asr_up.add_argument("--output-root", default="output")
+    asr_up.add_argument("--library-root", default="library")
+    asr_up.add_argument("--if-exists", choices=["fail", "skip", "overwrite"], default="overwrite")
+    asr_up.add_argument("--asr-device", default="cpu")
+    asr_up.add_argument("--asr-compute", default="int8")
+    asr_up.add_argument("--asr-model", default="auto")
+    asr_up.add_argument("--asr-lang", default=None)
+    asr_up.add_argument("--process-limit", type=int, default=0, help="本次最多处理多少个缺失转写的 bvid（0=不限制）")
+    asr_up.add_argument("--out-dir", default="discoveries", help="进度/失败记录输出目录（默认 discoveries/）")
+
+    return parser
+
+
+def _harvest_artifacts_exist(bvid_dir: Path) -> bool:
+    return (bvid_dir / "json" / "metadata.json").exists() and (bvid_dir / "logs" / "harvest_run.json").exists()
+
+
+def _asr_artifacts_exist(bvid_dir: Path) -> bool:
+    return any(
+        path.exists()
+        for path in (
+            bvid_dir / "asr" / "transcript.txt",
+            bvid_dir / "asr" / "transcript_all.txt",
+        )
+    )
+
+
+def _export_artifacts_exist(state: Dict[str, Any]) -> bool:
+    detail = state.get("stages", {}).get("export", {}).get("detail", {})
+    if not isinstance(detail, dict):
+        return False
+    dest_dir = detail.get("dest_dir")
+    return isinstance(dest_dir, str) and Path(dest_dir).is_dir()
+
+
+def _warn_if_cookie_stale(cookiefile: Optional[Path], proxy: Optional[str]) -> bool:
+    """Return True if cookie is confirmed stale (and print a warning)."""
+    if cookiefile is None or not cookiefile.exists():
+        return False
+    try:
+        from bilibili_harvester.cookies import check_login_state, read_cookie_file, STALE_COOKIE_HINT
+
+        header, _ = read_cookie_file(str(cookiefile))
+        state = check_login_state(header, proxy=proxy)
+    except Exception:
+        return False
+    if state is False:
+        _print_utf8(f"[COOKIE WARN] {STALE_COOKIE_HINT}")
+        return True
+    return False
+
+
+def _run_cmd(args: argparse.Namespace) -> int:
+    cookie_path = Path(args.cookies)
+    cookiefile = cookie_path if cookie_path.exists() else None
+    out_root = ensure_dir(args.output_root)
+    _warn_if_cookie_stale(cookiefile, args.proxy)
+
+    urls: List[str] = []
+    if args.url:
+        urls.extend(extract_targets(args.url))
+    if args.targets:
+        targets_path = Path(args.targets)
+        if not targets_path.exists():
+            _print_utf8(f"未找到 targets 文件：{targets_path}")
+            return 2
+        urls.extend(extract_targets(targets_path.read_text(encoding="utf-8", errors="ignore").splitlines()))
+    if not urls:
+        _print_utf8("请通过 --url 或 --targets 提供目标")
+        return 2
+
+    urls = list(dict.fromkeys(urls))
+    download_set = set([x.strip() for x in args.download.split(",") if x.strip() and x.strip() != "none"])
+
+    do_asr = (not args.no_asr)  # default on
+    if args.asr:
+        do_asr = True
+    do_export = (not args.no_export)  # default on
+    if args.export:
+        do_export = True
+
+    cfg = ASRConfig(model=args.asr_model, device=args.asr_device, compute_type=args.asr_compute, language=args.asr_lang)
+
+    failures = 0
+    for u in urls:
+        bvid = extract_bvid(u)
+        bvid_dir = (out_root / bvid).resolve() if bvid else None
+        state: Optional[Dict[str, Any]] = None
+        if bvid and bvid_dir is not None:
+            state = load_or_create_state(bvid_dir, bvid=bvid, source_url=u)
+
+        try:
+            if (
+                args.resume
+                and state is not None
+                and bvid_dir is not None
+                and stage_succeeded(state, "harvest")
+                and _harvest_artifacts_exist(bvid_dir)
+            ):
+                r = {"bvid": bvid, "outdir": str(bvid_dir)}
+                _print_utf8(f"[HARVEST RESUME] {bvid} -> {bvid_dir}")
+            else:
+                if state is not None and bvid_dir is not None:
+                    set_stage(bvid_dir, state, "harvest", "running")
+                    set_stage(bvid_dir, state, "asr", "pending")
+                    set_stage(bvid_dir, state, "export", "pending")
+                r = harvest_one(
+                    u,
+                    cookiefile=cookiefile,
+                    out_root=out_root,
+                    structured_root=out_root,
+                    download_set=download_set,
+                    proxy=args.proxy,
+                    comment_pages=args.comment_pages,
+                )
+                bvid = str(r.get("bvid") or "unknown")
+                bvid_dir = Path(str(r.get("outdir") or (out_root / bvid))).resolve()
+                if state is None:
+                    state = load_or_create_state(bvid_dir, bvid=bvid, source_url=u)
+                set_stage(bvid_dir, state, "harvest", "succeeded", detail={"outdir": str(bvid_dir)})
+                _print_utf8(f"[HARVEST OK] {bvid} -> {bvid_dir}")
+        except Exception as e:
+            if state is not None and bvid_dir is not None:
+                set_stage(bvid_dir, state, "harvest", "failed", error=str(e))
+            failures += 1
+            _print_utf8(f"[HARVEST FAIL] {u} reason={e}")
+            if args.fail_fast:
+                return 1
+            continue
+
+        if bvid_dir is None or state is None:
+            raise RuntimeError(f"pipeline state was not initialized for {u}")
+
+        # Optional enrichment (PBP / videoshot snapshots)
+        try:
+            from .snapshots_policy import resolve_snapshots_mode
+
+            decision = resolve_snapshots_mode(str(args.snapshots or "none"), bvid_dir=bvid_dir)
+            snapshots_mode = decision.effective.strip().lower()
+            do_enrich = bool(args.pbp) or snapshots_mode != "none"
+            if do_enrich:
+                from bilibili_enrich.enrich import enrich_bvid_dir
+
+                cookie_path = Path(args.cookies)
+                cookiefile2 = cookie_path if cookie_path.exists() else None
+                rep = enrich_bvid_dir(
+                    bvid_dir,
+                    cookiefile=cookiefile2,
+                    proxy=args.proxy,
+                    pbp=bool(args.pbp),
+                    snapshots=str(snapshots_mode),
+                    snapshot_k=int(args.snapshot_k),
+                )
+                _print_utf8(
+                    f"[ENRICH OK] {bvid} pbp={bool(rep.pbp_path)} videoshot={bool(rep.videoshot_path)} snapshots={len(rep.snapshots)}"
+                )
+        except Exception as e:
+            failures += 1
+            _print_utf8(f"[ENRICH FAIL] {bvid} reason={e}")
+            if args.fail_fast:
+                return 1
+
+        if do_asr:
+            try:
+                if args.resume and stage_succeeded(state, "asr") and _asr_artifacts_exist(bvid_dir):
+                    _print_utf8(f"[ASR RESUME] {bvid} -> existing transcript")
+                else:
+                    set_stage(bvid_dir, state, "asr", "running")
+                    rep = transcribe_bvid_dir(bvid_dir, cfg, merge_pages=True, fail_fast=False)
+                    set_stage(
+                        bvid_dir,
+                        state,
+                        "asr",
+                        "succeeded",
+                        detail={"mode": rep.get("mode"), "merged": rep.get("merged")},
+                    )
+                    _print_utf8(f"[ASR OK] {bvid} mode={rep.get('mode')} merged={rep.get('merged')}")
+            except Exception as e:
+                set_stage(bvid_dir, state, "asr", "failed", error=str(e))
+                failures += 1
+                _print_utf8(f"[ASR FAIL] {bvid} reason={e}")
+                msg = str(e)
+                if "音频" in msg or "audio" in msg.lower():
+                    _print_utf8(
+                        f"[HINT] {bvid} 音频缺失常见原因：412 反爬（运行 python -m pip install -U yt-dlp 后重试）/"
+                        "充电专属或已删除视频/网络抖动。采集产物已保留在 {bvid_dir}"
+                    )
+                if args.fail_fast:
+                    return 1
+                continue
+        else:
+            set_stage(bvid_dir, state, "asr", "skipped", detail={"reason": "--no-asr"})
+
+        if do_export:
+            try:
+                if args.resume and stage_succeeded(state, "export") and _export_artifacts_exist(state):
+                    _print_utf8(f"[EXPORT RESUME] {bvid} -> existing library directory")
+                else:
+                    set_stage(bvid_dir, state, "export", "running")
+                    ex = export_bvid(
+                        bvid,
+                        output_root=Path(args.output_root),
+                        library_root=Path(args.library_root),
+                        if_exists=args.if_exists,
+                        dry_run=False,
+                    )
+                    set_stage(bvid_dir, state, "export", "succeeded", detail={"dest_dir": str(ex.dest_dir)})
+                    _print_utf8(f"[EXPORT OK] {bvid} -> {ex.dest_dir}")
+                if args.prune_output:
+                    try:
+                        shutil.rmtree(bvid_dir)
+                        _print_utf8(f"[PRUNE OK] removed {bvid_dir}")
+                    except Exception as e:
+                        failures += 1
+                        _print_utf8(f"[PRUNE FAIL] {bvid} reason={e}")
+                        if args.fail_fast:
+                            return 1
+            except Exception as e:
+                set_stage(bvid_dir, state, "export", "failed", error=str(e))
+                failures += 1
+                _print_utf8(f"[EXPORT FAIL] {bvid} reason={e}")
+                if args.fail_fast:
+                    return 1
+        else:
+            set_stage(bvid_dir, state, "export", "skipped", detail={"reason": "--no-export"})
+
+    _print_utf8(f"Done. items={len(urls)} fail={failures}")
+
+    # Summarize output leftovers (harvested but not exported/pruned) so they are never silently lost.
+    try:
+        leftovers = [d.name for d in out_root.iterdir() if d.is_dir() and (d / "json" / "metadata.json").exists()]
+        if leftovers:
+            _print_utf8(
+                f"[LEFTOVER] {len(leftovers)} 个 output/ 目录已采集但未导出：{', '.join(sorted(leftovers)[:10])}"
+                "… 可用 python -m bilibili_get export --all 补导出"
+            )
+    except Exception:
+        pass
+    return 0 if failures == 0 else 1
+
+
+def _export_cmd(args: argparse.Namespace) -> int:
+    output_root = Path(args.output_root)
+    library_root = Path(args.library_root)
+    bvids = list(args.bvid or [])
+    if args.all:
+        bvids.extend(iter_bvid_dirs(output_root))
+    bvids = list(dict.fromkeys([b.strip() for b in bvids if b and b.strip()]))
+    if not bvids:
+        _print_utf8("请指定 --bvid BVxxxx 或使用 --all")
+        return 2
+    failed = 0
+    for bvid in bvids:
+        try:
+            r = export_bvid(bvid, output_root=output_root, library_root=library_root, if_exists=args.if_exists, dry_run=False)
+            _print_utf8(f"[OK] {bvid} -> {r.dest_dir}")
+        except Exception as e:
+            failed += 1
+            _print_utf8(f"[FAIL] {bvid}: {e}")
+    return 0 if failed == 0 else 1
+
+
+def _delegate_to_bilibili_search(argv: List[str]) -> int:
+    from bilibili_search.cli import main as search_main
+
+    try:
+        search_main(argv)
+        return 0
+    except SystemExit as e:
+        code = int(getattr(e, "code", 0) or 0)
+        return code
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.cmd == "run":
+        sys.exit(_run_cmd(args))
+    if args.cmd == "export":
+        sys.exit(_export_cmd(args))
+    if args.cmd == "search":
+        # Delegate to existing CLI to keep behavior consistent.
+        sub_argv: List[str] = ["pipeline" if args.pipeline else "search"]
+        sub_argv.extend(["--keyword", args.keyword, "--order", args.order, "--limit", str(args.limit), "--cookies", args.cookies])
+        if args.proxy:
+            sub_argv.extend(["--proxy", args.proxy])
+        sub_argv.extend(["--out-dir", args.out_dir])
+        if args.pipeline:
+            sub_argv.extend(
+                [
+                    "--output-root",
+                    args.output_root,
+                    "--library-root",
+                    args.library_root,
+                    "--download",
+                    args.download,
+                    "--comment-pages",
+                    str(args.comment_pages),
+                    "--asr-device",
+                    args.asr_device,
+                    "--asr-compute",
+                    args.asr_compute,
+                    "--asr-model",
+                    args.asr_model,
+                    "--if-exists",
+                    args.if_exists,
+                ]
+            )
+            if args.asr_lang:
+                sub_argv.extend(["--asr-lang", args.asr_lang])
+        sys.exit(_delegate_to_bilibili_search(sub_argv))
+    if args.cmd == "uploader":
+        sub_argv = ["uploader"]
+        if args.seed_bvid:
+            sub_argv.extend(["--seed-bvid", args.seed_bvid])
+        if args.mid:
+            sub_argv.extend(["--mid", str(args.mid)])
+        sub_argv.extend(["--order", args.order, "--limit", str(args.limit), "--cookies", args.cookies, "--out-dir", args.out_dir])
+        if args.keyword:
+            sub_argv.extend(["--keyword", args.keyword])
+        if args.proxy:
+            sub_argv.extend(["--proxy", args.proxy])
+        if args.pipeline:
+            sub_argv.append("--pipeline")
+            sub_argv.extend(
+                [
+                    "--output-root",
+                    args.output_root,
+                    "--library-root",
+                    args.library_root,
+                    "--download",
+                    args.download,
+                    "--comment-pages",
+                    str(args.comment_pages),
+                    "--asr-device",
+                    args.asr_device,
+                    "--asr-compute",
+                    args.asr_compute,
+                    "--asr-model",
+                    args.asr_model,
+                    "--if-exists",
+                    args.if_exists,
+                ]
+            )
+            if args.asr_lang:
+                sub_argv.extend(["--asr-lang", args.asr_lang])
+        sys.exit(_delegate_to_bilibili_search(sub_argv))
+
+    if args.cmd == "asr-uploader":
+        # Discover uploader videos via space API, then fill missing ASR under output/<bvid>/ and overwrite export to library/.
+        if bool(args.seed_bvid) == bool(args.mid):
+            _print_utf8("请指定 --seed-bvid 或 --mid（二选一）")
+            sys.exit(2)
+
+        from bilibili_search.session import build_web_session
+        from bilibili_search.seed import fetch_owner_info_by_bvid
+        from bilibili_search.space import list_space_videos
+        from bilibili_search.wbi import extract_wbi_keys_from_nav_json
+        from bilibili_library.naming import sanitize_component
+
+        cookie_path = Path(args.cookies)
+        cookiefile = cookie_path if cookie_path.exists() else None
+        if _warn_if_cookie_stale(cookiefile, args.proxy):
+            _print_utf8("space 发现接口依赖登录态，已中止。请先更新 cookie.txt 再重试。")
+            sys.exit(2)
+        sess, cookie_brief = build_web_session(cookiefile, proxy=args.proxy)
+
+        owner_mid = int(args.mid or 0)
+        owner_name = str(owner_mid)
+        if args.seed_bvid:
+            owner = fetch_owner_info_by_bvid(sess, args.seed_bvid.strip())
+            owner_mid = owner.mid
+            owner_name = owner.name
+
+        nav = sess.get("https://api.bilibili.com/x/web-interface/nav", timeout=15)
+        nav.raise_for_status()
+        keys = extract_wbi_keys_from_nav_json(nav.json())
+
+        items = list_space_videos(
+            sess,
+            keys,
+            mid=owner_mid,
+            order=args.order,
+            tid=0,
+            keyword=args.keyword,
+            limit=args.limit,
+            max_pages=0,
+            page_sleep=0.2,
+            ps=30,
+        )
+
+        safe_owner = sanitize_component(owner_name or str(owner_mid), max_len=60)
+        safe_kw = sanitize_component(args.keyword, max_len=60) if args.keyword else "all"
+        run_dir = Path(args.out_dir) / f"{_utc_now_compact()}_asr_up_{owner_mid}_{safe_owner}_kw_{safe_kw}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "meta.json").write_text(
+            json.dumps(
+                {
+                    "uploader": {"mid": owner_mid, "name": owner_name},
+                    "limit": args.limit,
+                    "order": args.order,
+                    "keyword": args.keyword,
+                    "cookie_mode": getattr(cookie_brief, "mode", None),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (run_dir / "targets.txt").write_text(
+            "\n".join([f"{it.bvid}\t{it.title}" for it in items]) + ("\n" if items else ""),
+            encoding="utf-8",
+        )
+        results_path = run_dir / "results.jsonl"
+        for it in items:
+            _append_jsonl(
+                results_path,
+                {
+                    "bvid": it.bvid,
+                    "title": it.title,
+                    "author": it.author,
+                    "mid": it.mid,
+                    "created": it.created,
+                    "length_text": it.length_text,
+                    "length_seconds": it.length_seconds,
+                    "play": it.play,
+                },
+            )
+        _print_utf8(f"[DISCOVER] up={owner_name} mid={owner_mid} items={len(items)} progress_dir={run_dir}")
+
+        cfg = ASRConfig(model=args.asr_model, device=args.asr_device, compute_type=args.asr_compute, language=args.asr_lang)
+        processed = 0
+        failures = 0
+        for it in items:
+            bvid = it.bvid
+            output_root = Path(args.output_root)
+            library_root = Path(args.library_root)
+            bvid_dir = (output_root / bvid).resolve()
+
+            out_asr_txt = bvid_dir / "asr" / "transcript.txt"
+            out_asr_all = bvid_dir / "asr" / "transcript_all.txt"
+            has_output_asr = out_asr_txt.exists() or out_asr_all.exists()
+
+            dest_dir = None
+            try:
+                expected = export_bvid(
+                    bvid,
+                    output_root=output_root,
+                    library_root=library_root,
+                    if_exists="overwrite",
+                    dry_run=True,
+                )
+                dest_dir = expected.dest_dir
+            except Exception:
+                dest_dir = None
+
+            has_library_asr = False
+            if dest_dir is not None:
+                lib_asr_txt = dest_dir / "asr" / "transcript.txt"
+                lib_asr_all = dest_dir / "asr" / "transcript_all.txt"
+                has_library_asr = lib_asr_txt.exists() or lib_asr_all.exists()
+
+            if has_output_asr and has_library_asr:
+                continue
+            if args.process_limit and processed >= args.process_limit:
+                break
+            try:
+                if not has_output_asr:
+                    if not bvid_dir.exists():
+                        raise FileNotFoundError(f"missing output dir: {bvid_dir}")
+                    _print_utf8(f"[ASR] {bvid} {it.title}")
+                    transcribe_bvid_dir(bvid_dir, cfg, merge_pages=True, fail_fast=False)
+            except Exception as e:
+                failures += 1
+                _append_jsonl(run_dir / "failures.jsonl", {"bvid": bvid, "stage": "asr", "error": str(e)})
+                _print_utf8(f"[FAIL] ASR {bvid}: {e}")
+                continue
+
+            try:
+                ex = export_bvid(
+                    bvid,
+                    output_root=output_root,
+                    library_root=library_root,
+                    if_exists=args.if_exists,
+                    dry_run=False,
+                )
+                processed += 1
+                _print_utf8(f"[EXPORT] {bvid} -> {ex.dest_dir}")
+            except Exception as e:
+                failures += 1
+                _append_jsonl(run_dir / "failures.jsonl", {"bvid": bvid, "stage": "export", "error": str(e)})
+                _print_utf8(f"[FAIL] EXPORT {bvid}: {e}")
+                continue
+
+        _print_utf8(f"Done. processed={processed} failures={failures} progress_dir={run_dir}")
+        sys.exit(0 if failures == 0 else 1)
+
+    raise RuntimeError(f"unknown cmd: {args.cmd}")
+
+
+if __name__ == "__main__":
+    main()

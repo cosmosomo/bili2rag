@@ -1,0 +1,15 @@
+# Copy this file to cookie.txt and fill in your own cookies exported from bilibili.com.
+# Two formats are accepted:
+#
+# 1) Single-line header format (recommended, easy to copy from browser DevTools):
+buvid3=xxxxxxxx; buvid4=xxxxxxxx; SESSDATA=xxxxxxxx; bili_jct=xxxxxxxx; DedeUserID=123456
+#
+# 2) Netscape cookies.txt format (exported via a browser extension):
+# Netscape HTTP Cookie File
+# .bilibili.com	TRUE	/	FALSE	0	SESSDATA	xxxxxxxx
+#
+# Notes:
+# - SESSDATA is required for search / uploader discovery (space API) and member-only content.
+# - The tool checks login state at startup and warns when SESSDATA expires (stale cookies make
+#   space APIs fail with a misleading -352 risk-control error).
+# - NEVER commit your real cookie.txt. It is a login credential.

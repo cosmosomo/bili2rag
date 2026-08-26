@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Test / tooling caches
+.pytest_cache/
+.benchmarks/
+.coverage
+htmlcov/
+
+# Runtime data (private, never commit)
+cookie.txt
+*.cookie.txt
+library/
+output/
+discoveries/
+logs/
+*.log
+
+# Working files
+.tmp/
+target*.txt
+targets*.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

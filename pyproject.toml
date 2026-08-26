@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bili2rag"
+version = "0.1.0"
+description = "Turn Bilibili videos into a local RAG-ready corpus: harvest audio/subtitles/comments, ASR transcription (Simplified Chinese enforced), and a readable per-video library."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "bili2rag contributors" }]
+keywords = ["bilibili", "rag", "asr", "whisper", "yt-dlp", "corpus", "knowledge-base"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Text Processing :: Linguistic",
+]
+dependencies = [
+    "requests>=2.31",
+    "yt-dlp>=2026.1.1",
+    "faster-whisper>=1.0",
+    "hanziconv>=0.3.2",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+bili2rag = "bilibili_get.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/OWNER/bili2rag"
+
+[tool.setuptools]
+packages = [
+    "bilibili_get",
+    "bilibili_harvester",
+    "bilibili_asr",
+    "bilibili_search",
+    "bilibili_enrich",
+    "bilibili_library",
+    "scripts",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
