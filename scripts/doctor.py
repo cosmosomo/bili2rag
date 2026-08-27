@@ -113,6 +113,17 @@ def main(argv: Optional[List[str]] = None) -> None:
     report["output_leftovers"] = leftovers
     report["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
 
+    from bilibili_library.completion import list_unavailable
+
+    unavailable = list_unavailable(library_root)
+    report["unavailable"] = sorted(unavailable)
+
+    # Unavailable videos are a terminal account of their own; keep them out of
+    # the "missing" noise (their library dirs may exist from salvage exports).
+    unavail_set = set(unavailable)
+    for key in ("missing_asr", "missing_audio", "empty_comments"):
+        report[key] = [item for item in report[key] if item.get("bvid") not in unavail_set]
+
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     run_dir = Path(args.out_dir) / f"{ts}_doctor"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -122,7 +133,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     _print_utf8(
         f"[SCAN] uploaders={report['uploaders']} videos={report['videos']} "
         f"missing_asr={len(report['missing_asr'])} missing_audio={len(report['missing_audio'])} "
-        f"empty_comments={len(report['empty_comments'])} output_leftovers={len(leftovers)}"
+        f"empty_comments={len(report['empty_comments'])} unavailable={len(unavailable)} "
+        f"output_leftovers={len(leftovers)}"
     )
     _print_utf8(f"[REPORT] {report_path}")
 
@@ -132,6 +144,26 @@ def main(argv: Optional[List[str]] = None) -> None:
         _print_utf8(f"[MISSING AUDIO] {item['uploader']} / {item['dir']}")
     for item in report["empty_comments"][:10]:
         _print_utf8(f"[EMPTY COMMENTS] {item['uploader']} / {item['dir']}")
+    for bvid in report["unavailable"][:10]:
+        reason = (unavailable.get(bvid) or {}).get("reason", "")
+        _print_utf8(f"[UNAVAILABLE] {bvid} {reason}")
+
+    # Repair routing: in-place ASR vs engine refetch (single executor).
+    partial_n = sum(
+        1 for item in report["missing_asr"]
+        if item["bvid"] not in {i["bvid"] for i in report["missing_audio"]}
+    )
+    if partial_n or report["missing_audio"]:
+        _print_utf8(
+            f"[FIX] 就地补转写 {partial_n} 条：python -m bilibili_get repair --library-root \"{library_root}\""
+        )
+        if report["missing_audio"]:
+            _print_utf8(
+                f"[FIX] 重抓缺音频 {len(report['missing_audio'])} 条：python -m bilibili_get repair "
+                f"--library-root \"{library_root}\"（会生成 targets_repair.txt 并给出 grab-targets 命令）"
+            )
+    if unavailable:
+        _print_utf8("[FIX] 重试终态：python -m bilibili_get grab-* --include-unavailable")
 
     if args.write_targets:
         repair = {}
@@ -143,7 +175,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         lines = [f"{bvid}\t{dirname}" for bvid, dirname in sorted(repair.items())]
         targets_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
         _print_utf8(f"[TARGETS] {len(repair)} 条待修复 -> {targets_path}")
-        _print_utf8("修复方式（缺音频需重抓，缺转写可用 asr-uploader 或 collect_targets.py --if-exists overwrite）")
 
 
 if __name__ == "__main__":

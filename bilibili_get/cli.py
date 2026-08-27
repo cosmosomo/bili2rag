@@ -179,6 +179,22 @@ def build_parser() -> argparse.ArgumentParser:
     grab_t.add_argument("--name", default="", help="运行名（用于 discoveries 目录命名）")
     _add_batch_pipeline_args(grab_t)
 
+    repair = sub.add_parser(
+        "repair",
+        help="修复库内缺口：就地补转写（有音频缺转写的目录）并重写 manifest；"
+             "缺音频/缺目录的输出 targets_repair.txt 供 grab-targets 重抓（repair 自己不抓取）",
+    )
+    repair.add_argument("--library-root", default="library")
+    repair.add_argument("--output-root", default="output", help="仅用于生成重抓命令的提示")
+    repair.add_argument("--asr-device", default="cpu")
+    repair.add_argument("--asr-compute", default="int8")
+    repair.add_argument("--asr-model", default="auto")
+    repair.add_argument("--asr-lang", default=None)
+    repair.add_argument("--limit", type=int, default=0, help="本次最多就地转写多少条（0=不限制）")
+    repair.add_argument("--dry-run", action="store_true", help="只列出将要修复的目录，不执行")
+    repair.add_argument("--mark-unavailable", action="append", default=[], help="手动标记终态不可得（可重复）")
+    repair.add_argument("--out-dir", default="discoveries", help="targets_repair.txt 输出目录")
+
     return parser
 
 
@@ -431,6 +447,97 @@ def _export_cmd(args: argparse.Namespace) -> int:
     return 0 if failed == 0 else 1
 
 
+def _repair_cmd(args: argparse.Namespace) -> int:
+    """In-place repairs only (amendment D): transcribe+manifest; never fetch.
+
+    Refetch candidates are written to targets_repair.txt with a ready-to-run
+    grab-targets command line — fetching has exactly one executor.
+    """
+    from bilibili_asr.asr import ASRConfig, transcribe_bvid_dir
+    from bilibili_library.completion import (
+        CLASS_NO_AUDIO,
+        CLASS_NO_TRANSCRIPT_WITH_AUDIO,
+        classify,
+        extract_bvid_from_dirname,
+        iter_video_dirs,
+        list_unavailable,
+        mark_unavailable,
+    )
+    from bilibili_library.exporter import rewrite_manifest
+
+    library_root = Path(args.library_root).resolve()
+    if not library_root.is_dir():
+        _print_utf8(f"未找到 library 目录：{library_root}")
+        return 2
+
+    # 0) manual unavailable marking (escape hatch)
+    for bvid in args.mark_unavailable:
+        mark_unavailable(library_root, bvid, reason="manual")
+        _print_utf8(f"[UNAVAILABLE] {bvid} marked (manual)")
+
+    unavailable = list_unavailable(library_root)
+    partials: List[Dict[str, str]] = []
+    refetch: List[Dict[str, str]] = []
+    for v_dir in iter_video_dirs(library_root):
+        bvid = extract_bvid_from_dirname(v_dir.name) or v_dir.name
+        if bvid in unavailable:
+            continue  # terminal account; retry goes through grab-* --include-unavailable
+        state = classify(v_dir)
+        if state == CLASS_NO_TRANSCRIPT_WITH_AUDIO:
+            partials.append({"bvid": bvid, "dir": str(v_dir)})
+        elif state == CLASS_NO_AUDIO:
+            refetch.append({"bvid": bvid, "dir": str(v_dir)})
+
+    _print_utf8(
+        f"[SCAN] partial={len(partials)} refetch={len(refetch)} unavailable={len(unavailable)}"
+    )
+
+    # 1) in-place transcription for partials (the cheap fix)
+    done_now = 0
+    failures = 0
+    if partials:
+        cfg = ASRConfig(model=args.asr_model, device=args.asr_device, compute_type=args.asr_compute, language=args.asr_lang)
+        work = partials if not args.limit else partials[: int(args.limit)]
+        for item in work:
+            v_dir = Path(item["dir"])
+            if args.dry_run:
+                _print_utf8(f"[DRY] transcribe in place: {v_dir.name}")
+                continue
+            _print_utf8(f"[REPAIR-ASR] {item['bvid']} {v_dir.name}")
+            try:
+                transcribe_bvid_dir(v_dir, cfg, merge_pages=True, fail_fast=False)
+                rewrite_manifest(v_dir)  # amendment B: manifest must not lie
+                done_now += 1
+                _print_utf8(f"[REPAIR-ASR OK] {item['bvid']} (manifest rewritten)")
+            except Exception as e:
+                failures += 1
+                _print_utf8(f"[REPAIR-ASR FAIL] {item['bvid']} reason={e}")
+                if args.fail_fast:
+                    break
+
+    # 2) refetch candidates -> targets file + ready command (fetching stays in the engine)
+    if refetch:
+        ts = _utc_now_compact()
+        run_dir = Path(args.out_dir) / f"{ts}_repair"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        targets_path = run_dir / "targets_repair.txt"
+        lines = [f"【{Path(it['dir']).name}】https://www.bilibili.com/video/{it['bvid']}" for it in refetch]
+        targets_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _print_utf8(f"[REFETCH] {len(refetch)} 条缺音频/缺目录 -> {targets_path}")
+        _print_utf8(
+            "重抓命令（抓取只有一个执行者=引擎）：\n"
+            f"  python -m bilibili_get grab-targets --targets-file \"{targets_path}\" "
+            f"--cookies cookie.txt --asr-device {args.asr_device} --asr-compute {args.asr_compute} --prune-output"
+        )
+
+    if unavailable:
+        sample = ", ".join(list(unavailable)[:8])
+        _print_utf8(f"[UNAVAILABLE] {len(unavailable)} 条终态（示例 {sample}…）；重试请用 grab-* --include-unavailable")
+
+    _print_utf8(f"Done. repaired={done_now} refetch_candidates={len(refetch)} failures={failures}")
+    return 1 if failures else 0
+
+
 def _delegate_to_bilibili_search(argv: List[str]) -> int:
     from bilibili_search.cli import main as search_main
 
@@ -593,6 +700,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(_grab_uploader_cmd(args))
     if args.cmd == "grab-targets":
         sys.exit(_grab_targets_cmd(args))
+    if args.cmd == "repair":
+        sys.exit(_repair_cmd(args))
     if args.cmd == "search":
         # Delegate to existing CLI to keep behavior consistent.
         sub_argv: List[str] = ["pipeline" if args.pipeline else "search"]

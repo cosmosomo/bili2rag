@@ -26,20 +26,23 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from bilibili_library.completion import (
+    CLASS_NO_TRANSCRIPT_WITH_AUDIO,
+    CLASS_OK,
     append_failure,
     classify,
     find_video_dir,
     is_done,
-    is_unavailable,
     list_unavailable,
     mark_unavailable,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Conservative patterns: only explicit not-found / permission errors may pin
-# the permanent unavailable state. Transient failures must not.
-_UNAVAILABLE_PATTERNS = ("-404", "-403", "404 Not Found", "啥都木有", "稿件不可见", "视频不存在")
+# Conservative patterns: only explicit not-found / permission / invisible errors
+# may pin the permanent unavailable state. Transient failures must not.
+# -87008 = 稿件不可见 (deleted / charging-exclusive / private); retry via
+# --include-unavailable after refreshing cookies.
+_UNAVAILABLE_PATTERNS = ("-404", "-403", "-87008", "404 Not Found", "啥都木有", "稿件不可见", "视频不存在")
 
 
 @dataclass(frozen=True)
@@ -105,7 +108,8 @@ def _print_utf8(line: str) -> None:
         pass
 
 
-def build_run_cmd(cfg: BatchConfig, bvid: str) -> List[str]:
+def build_run_cmd(cfg: BatchConfig, bvid: str, *, if_exists_override: Optional[str] = None) -> List[str]:
+    if_exists = if_exists_override or cfg.if_exists
     cmd: List[str] = [
         sys.executable,
         "-m",
@@ -130,7 +134,7 @@ def build_run_cmd(cfg: BatchConfig, bvid: str) -> List[str]:
         "--asr-model",
         cfg.asr_model,
         "--if-exists",
-        cfg.if_exists,
+        if_exists,
     ]
     if cfg.pbp:
         cmd.append("--pbp")
@@ -174,7 +178,7 @@ def _salvage(cfg: BatchConfig, bvid: str) -> Optional[Path]:
             bvid,
             output_root=Path(cfg.output_root),
             library_root=Path(cfg.library_root),
-            if_exists=cfg.if_exists,
+            if_exists="overwrite",  # salvage never discards artifacts to an old dir
             dry_run=False,
         )
     except Exception:
@@ -227,7 +231,10 @@ def run_batch(items: List[BatchItem], cfg: BatchConfig) -> BatchReport:
 
         log_path = logs_dir / f"{bvid}.log"
         _print_utf8(f"[RUN] {bvid} {title}".rstrip())
-        cmd = build_run_cmd(cfg, bvid)
+        # If an incomplete dir already exists, `skip` would silently discard
+        # the fresh harvest (export skipped + output pruned) — force overwrite.
+        if_exists_override = "overwrite" if vdir is not None else None
+        cmd = build_run_cmd(cfg, bvid, if_exists_override=if_exists_override)
         try:
             with log_path.open("w", encoding="utf-8") as f:
                 p = subprocess.run(cmd, cwd=str(_REPO_ROOT), stdout=f, stderr=subprocess.STDOUT)
@@ -240,56 +247,54 @@ def run_batch(items: List[BatchItem], cfg: BatchConfig) -> BatchReport:
                 break
             continue
 
+        salvaged: Optional[Path] = None
         if p.returncode != 0:
-            salvaged_dir = _salvage(cfg, bvid)
-            if salvaged_dir is not None:
-                if not is_done(salvaged_dir):
-                    append_failure(
-                        library_root,
-                        bvid=bvid,
-                        stage="partial_asr",
-                        error=f"returncode={p.returncode}, salvaged without transcript",
-                        title=title,
-                        run_id=run_id,
-                    )
-                report.exported.append(bvid)
-                _print_utf8(f"[SALVAGE] {bvid} returncode={p.returncode} -> {salvaged_dir}")
-                _sleep(cfg)
-                continue
+            # The subprocess may crash mid-pipeline while having already
+            # exported (overwrite) or left a salvageable output dir. Both are
+            # settled by the unified final-state classification below.
+            salvaged = _salvage(cfg, bvid)
 
+        final_dir = find_video_dir(library_root, bvid)
+        state = classify(final_dir)
+        if state == CLASS_OK:
+            report.exported.append(bvid)
+            tag = " (salvaged)" if salvaged is not None else ""
+            _print_utf8(f"[OK] {bvid}{tag} -> {final_dir}")
+        elif state == CLASS_NO_TRANSCRIPT_WITH_AUDIO:
+            append_failure(
+                library_root, bvid=bvid, stage="partial_asr",
+                error=f"returncode={p.returncode}, no transcript after run", title=title, run_id=run_id,
+            )
+            report.skipped_partial.append(bvid)
+            _print_utf8(f"[PARTIAL] {bvid} exported without transcript -> repair")
+        else:
+            # No audio at all: the stream is unavailable. Check the log even
+            # on rc==0 — harvest logs yt-dlp -87008 warnings without failing.
             if _log_says_unavailable(log_path):
-                mark_unavailable(library_root, bvid, reason=f"auto: returncode={p.returncode} (404/403 pattern)")
+                mark_unavailable(library_root, bvid, reason=f"auto: no audio; returncode={p.returncode} (404/403/-87008)")
                 unavailable[bvid] = {"bvid": bvid}
                 append_failure(
                     library_root, bvid=bvid, stage="unavailable",
-                    error=f"returncode={p.returncode}", title=title, run_id=run_id,
+                    error=f"no audio; returncode={p.returncode}", title=title, run_id=run_id,
                 )
                 report.skipped_unavailable.append(bvid)
-                _print_utf8(f"[UNAVAILABLE] {bvid} marked (404/403); will skip in future runs")
+                _print_utf8(f"[UNAVAILABLE] {bvid} no audio; marked (will skip in future runs)")
                 continue
-
-            rec = {"bvid": bvid, "stage": "subprocess", "returncode": p.returncode, "log": str(log_path)}
+            rec = {
+                "bvid": bvid,
+                "stage": "subprocess" if p.returncode != 0 else "no_audio_after_run",
+                "returncode": p.returncode,
+                "log": str(log_path),
+            }
             report.failed.append(rec)
             append_failure(
-                library_root, bvid=bvid, stage="subprocess",
+                library_root, bvid=bvid, stage=rec["stage"],
                 error=f"returncode={p.returncode} log={log_path}", title=title, run_id=run_id,
             )
             _print_utf8(f"[FAIL] {bvid} returncode={p.returncode} log={log_path}")
             if cfg.fail_fast:
                 break
             continue
-
-        final_dir = find_video_dir(library_root, bvid)
-        if not is_done(final_dir):
-            append_failure(
-                library_root, bvid=bvid, stage="partial_asr",
-                error="returncode=0 but no transcript after run", title=title, run_id=run_id,
-            )
-            report.skipped_partial.append(bvid)
-            _print_utf8(f"[PARTIAL] {bvid} exported without transcript -> repair")
-        else:
-            report.exported.append(bvid)
-            _print_utf8(f"[OK] {bvid} -> {final_dir}")
         _sleep(cfg)
 
     _write_report(cfg.run_dir, report)

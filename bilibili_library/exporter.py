@@ -79,6 +79,11 @@ def _write_manifest(root: Path) -> None:
     _write_text(root / "manifest.json", json.dumps({"files": files}, ensure_ascii=False, indent=2) + "\n")
 
 
+def rewrite_manifest(root: Path) -> None:
+    """Public entry for in-place repairs: recompute manifest.json after edits."""
+    _write_manifest(root)
+
+
 def _pick_root_audio(source_dir: Path) -> Optional[Path]:
     candidates: List[Path] = []
     for pat in ("*.mp3", "*.m4a", "*.m4s", "*.aac", "*.wav", "*.flac"):
