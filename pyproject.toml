@@ -42,7 +42,7 @@ ffmpeg = ["imageio-ffmpeg>=0.4.9"]
 bili2rag = "bilibili_get.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/OWNER/bili2rag"
+Homepage = "https://github.com/cosmosomo/bili2rag"
 
 [tool.setuptools]
 packages = [

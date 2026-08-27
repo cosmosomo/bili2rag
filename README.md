@@ -21,7 +21,7 @@ RAG over video content needs clean text, not clickstreams. bili2rag focuses on o
 ## Install
 
 ```powershell
-git clone <this repo> bili2rag
+git clone https://github.com/cosmosomo/bili2rag.git bili2rag
 cd bili2rag
 pip install -e .            # or: pip install -e ".[dev]" for tests
 ```
