@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import os
 from pathlib import Path
@@ -13,7 +12,7 @@ from datetime import datetime, timezone
 import requests
 
 from .cookies import ensure_buvid_cookie_header, read_cookie_file, write_netscape_cookie_file_from_header
-from .utils import DEFAULT_HEADERS, ensure_dir, write_json, resolve_b23, extract_bvid, extract_targets
+from .utils import DEFAULT_HEADERS, ensure_dir, write_json, resolve_b23, extract_bvid
 from .ytwrap import (
     _download_audio_via_playurl_api,
     _ffmpeg_location_dir,
@@ -398,134 +397,3 @@ def harvest_one(url: str, cookiefile: Optional[Path], out_root: Path, structured
         "audio": str(audio_path) if audio_path else None,
         "video": str(video_path) if video_path else None,
     }
-
-
-def main(argv: Optional[List[str]] = None) -> None:
-    parser = argparse.ArgumentParser(description="Bilibili Harvester CLI")
-    sub = parser.add_subparsers(dest="cmd", required=True)
-
-    run = sub.add_parser("run", help="批量采集")
-    run.add_argument("--targets", default=None, help="URL 列表文件路径（默认 target_movie.txt；仅在未提供 --url 时启用）")
-    run.add_argument("--url", action="append", default=[], help="可选：直接指定 URL/BV 号（可重复），可与 --targets 同时使用")
-    run.add_argument("--cookies", default="cookie.txt", help="Netscape cookie 文件路径（可选）")
-    run.add_argument("--output", default="output", help="输出目录（原始+结构化均在此目录内）")
-    run.add_argument("--download", default="audio,subtitles,cover", help="下载项：video,audio,subtitles,cover,none 逗号分隔")
-    run.add_argument("--pages", type=int, default=1, help="评论拉取页数")
-    run.add_argument("--proxy", default=None, help="HTTP(S) 代理，如 http://127.0.0.1:7890")
-    run.add_argument("--asr", action="store_true", help="采集后自动执行本地 ASR（需要 faster-whisper）")
-    run.add_argument("--asr-device", default="cpu", help="cpu|cuda（默认 cpu）")
-    run.add_argument("--asr-compute", default="int8", help="int8|float16|float32|auto（默认 int8）")
-    run.add_argument("--asr-model", default="auto", help="auto|模型名(base/small/...)|本地模型目录路径")
-    run.add_argument("--asr-lang", default=None, help="可选：语言代码（如 zh、en），默认自动检测")
-    run.add_argument("--export", action="store_true", help="采集（可含 ASR）后导出为可读命名目录（library/）")
-    run.add_argument("--library-root", default="library", help="导出根目录（默认 library）")
-    run.add_argument("--if-exists", choices=["fail", "skip", "overwrite"], default="skip", help="导出目录已存在时策略")
-    run.add_argument("--fail-fast", action="store_true", help="遇到失败立即停止（默认继续处理并在最后返回非零码）")
-
-    args = parser.parse_args(argv)
-
-    if args.cmd == "run":
-        out_root = ensure_dir(args.output)
-        cookiefile = Path(args.cookies) if Path(args.cookies).exists() else None
-        download_set = set([x.strip() for x in args.download.split(",") if x.strip() and x.strip() != "none"])
-
-        urls: List[str] = []
-        if args.url:
-            urls.extend(extract_targets(args.url))
-
-        targets_path: Optional[Path] = None
-        if args.targets:
-            targets_path = Path(args.targets)
-        elif not urls:
-            targets_path = Path("target_movie.txt")
-
-        if targets_path is not None:
-            if not targets_path.exists():
-                _print_utf8(f"未找到 targets 文件：{targets_path}（也可以用 --url 直接传入）")
-                sys.exit(2)
-            urls.extend(extract_targets(targets_path.read_text(encoding="utf-8", errors="ignore").splitlines()))
-
-        # de-duplicate while preserving order
-        urls = list(dict.fromkeys(urls))
-        if not urls:
-            _print_utf8("未解析到任何 URL/BV 号，请检查 --targets/--url 内容")
-            sys.exit(2)
-
-        results: List[Dict[str, Any]] = []
-        failures = 0
-
-        cfg = None
-        transcriber = None
-        if args.asr:
-            from bilibili_asr.asr import ASRConfig, transcribe_bvid_dir
-
-            cfg = ASRConfig(model=args.asr_model, device=args.asr_device, compute_type=args.asr_compute, language=args.asr_lang)
-            transcriber = transcribe_bvid_dir
-
-        exporter = None
-        library_root = None
-        if args.export:
-            from bilibili_library.exporter import export_bvid
-
-            exporter = export_bvid
-            library_root = Path(args.library_root)
-
-        for u in urls:
-            try:
-                r = harvest_one(u, cookiefile=cookiefile, out_root=out_root, structured_root=out_root, download_set=download_set, proxy=args.proxy, comment_pages=args.pages)
-                rec: Dict[str, Any] = {"url": u, **r, "harvest_ok": True}
-                results.append(rec)
-                _print_utf8(f"[HARVEST OK] {r['bvid']} → {r['outdir']}")
-            except Exception as e:
-                failures += 1
-                results.append({"url": u, "harvest_ok": False, "error": str(e)})
-                _print_utf8(f"[HARVEST FAIL] {u}  reason={e}")
-                if args.fail_fast:
-                    raise
-                continue
-
-            bvid = r.get("bvid") or "unknown"
-            bvid_dir = Path(r.get("outdir") or (out_root / bvid)).resolve()
-
-            if cfg is not None and transcriber is not None:
-                try:
-                    report = transcriber(bvid_dir, cfg, merge_pages=True, fail_fast=args.fail_fast)
-                    results[-1]["asr_ok"] = True
-                    results[-1]["asr_report"] = report
-                    _print_utf8(f"[ASR OK] {bvid} mode={report.get('mode')} merged={report.get('merged')}")
-                except Exception as e:
-                    failures += 1
-                    results[-1]["asr_ok"] = False
-                    results[-1]["asr_error"] = str(e)
-                    _print_utf8(f"[ASR FAIL] {bvid}  reason={e}")
-                    if args.fail_fast:
-                        raise
-
-            if exporter is not None and library_root is not None:
-                try:
-                    ex = exporter(
-                        bvid,
-                        output_root=out_root,
-                        library_root=library_root,
-                        if_exists=args.if_exists,
-                        dry_run=False,
-                    )
-                    results[-1]["export_ok"] = True
-                    results[-1]["export_dir"] = str(ex.dest_dir)
-                    _print_utf8(f"[EXPORT OK] {bvid} → {ex.dest_dir}")
-                except Exception as e:
-                    failures += 1
-                    results[-1]["export_ok"] = False
-                    results[-1]["export_error"] = str(e)
-                    _print_utf8(f"[EXPORT FAIL] {bvid}  reason={e}")
-                    if args.fail_fast:
-                        raise
-
-        # 总体索引
-        write_json(out_root / "index.json", {"results": results})
-        _print_utf8(f"Done. items={len(results)} fail={failures} index={out_root / 'index.json'}")
-        sys.exit(0 if failures == 0 else 1)
-
-
-if __name__ == "__main__":
-    main()

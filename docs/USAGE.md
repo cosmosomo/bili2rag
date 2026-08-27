@@ -97,38 +97,40 @@ python -m bilibili_get run --url BV15JqABoEvj --cookies cookie.txt --asr-device 
 - `--resume`：跳过状态成功且产物仍存在的采集、转写和导出阶段；状态保存在 `output/<bvid>/logs/pipeline_state.json`。
 - `--proxy http://127.0.0.1:7890`：网络不稳可用代理。
 
-## 4. 批量：按 UP 主增量抓新（推荐：稳定模式）
+## 4. 批量：统一编排引擎（grab-uploader / grab-targets）
 
-### 4.1 推荐：每条视频独立进程（更抗抖动）
+所有批量走同一个引擎（`run_batch`）：每视频独立子进程抗崩溃；完成判断只有一条规则——
+`library 里目录存在且转写存在 = done`。跳过三态：`done` / `partial（有音频缺转写，等 repair）` /
+`unavailable（终态：已删除/充电专属，可用 --include-unavailable 显式重试）`。
 
-这个模式会：
-- 先从 UP 主 space API 发现最新 N 条；
-- 自动跳过“已导出到 library/ 的 BV”；
-- 对“新增 BV”逐条调用 `python -m bilibili_get run ...`（每条视频一个子进程），避免长批处理中途崩溃导致整批挂掉。
+### 4.1 按 UP 主增量抓新（space 发现头）
 
 ```powershell
-python .\scripts\grab_uploader_new_isolated.py `
+python -m bilibili_get grab-uploader `
   --seed-bvid BV1ZnzhB2EXe `
-  --discover-limit 50 `
-  --new-limit 10 `
+  --discover-limit 50 --new-limit 0 `
   --cookies .\cookie.txt `
   --asr-device cuda --asr-compute float16 `
   --prune-output
 ```
 
-参数说明：
-- `--seed-bvid`：用一个视频推导该 UP 主 mid（也可用 `--mid`）。
-- `--discover-limit`：发现多少条最新投稿。
-- `--new-limit`：本次最多处理多少条“新增”（0 表示不限制）。
-- `--between-sleep`：每条之间 sleep 秒数（防抖）。
-- `--pbp` / `--snapshots ...` / `--snapshot-k ...`：可选，批量抓取高能进度条与视频快照（同 `bilibili_get run`）。
-- 进度/日志：`discoveries/<timestamp>_up_<mid>_<name>_..._isolated/`
+- `--seed-bvid` / `--mid`：二选一定位 UP 主；`--discover-limit`：发现最近 N 条。
+- `--new-limit`：本次最多处理多少条新增（0=不限）；`--between-sleep`：防抖间隔。
+- 报告：`discoveries/<run_id>/report.json`（exported/skipped/failed 五账）+ 每视频日志。
 
-### 4.2 老批处理（不推荐，但仍保留）
+### 4.2 按清单批量（文件发现头；主题收集也用它）
 
 ```powershell
-python .\scripts\grab_uploader_new.py --seed-bvid BV1DTkvBXEMK --discover-limit 50 --new-limit 10 --cookies .\cookie.txt
+python -m bilibili_get grab-targets --targets-file .\targets.txt --prune-output --asr-device cuda --asr-compute float16
 ```
+
+- targets 文件任意格式（会自动抽 BV 号，支持 `【标题】URL` 与 `BV<TAB>标题` 两种行）。
+
+### 4.3 失败语义
+
+- 子进程崩溃 → 引擎 salvage（导出+清理已采集部分）→ 无转写则记 `partial`（等 repair）。
+- 明确不可得（-404/-403/-87008）→ 自动标 `unavailable`（`library/_ledger/unavailable.jsonl`）。
+- 其它失败 → 记入 `library/_ledger/failures.jsonl`（纯日志）+ 报告 failed 账。
 
 ## 5. 主题收集（把不同 UP 的视频归到一个主题目录）
 
@@ -165,7 +167,7 @@ python .\scripts\topic_make_targets_from_discoveries.py `
   - `systems`：一般系统论/控制论/系统思维/系统动力学/复杂系统 向
   - `country_pe`：各国政体/政治制度/经济体制/福利国家等“结构性介绍”向（尽量避开纯新闻快讯）
 
-### 5.2 运行主题收集（会自动抓取/转写/导出，然后生成 pointer）
+### 5.2 运行主题收集（引擎抓取/转写/导出，然后生成 pointer）
 
 ```powershell
 python .\scripts\topic_collect.py `
@@ -180,25 +182,24 @@ python .\scripts\topic_collect.py `
 产物：
 - 真实数据仍在：`library/<UP主>/<date_title_bvid>/`
 - 主题索引在：`library/_topics/个人IP/<date_title_bvid>/pointer.json`
+- topic_collect 内部调用统一编排引擎（无私有循环），仅保留 pointer 后处理。
 
-### 5.3 运行“无 topic 的批量采集”（适合按 UP/清单批量，不想生成 _topics）
-
-当你已经有一个 `targets.txt`（例如来自 `python -m bilibili_search uploader ...` 或手工整理）：
+### 5.3 无 topic 的清单批量（就是 grab-targets）
 
 ```powershell
-python .\scripts\collect_targets.py `
-  --name "MHYYYY_近20" `
+python -m bilibili_get grab-targets `
   --targets-file .\discoveries\<run_id>\targets.txt `
+  --name "MHYYYY_近20" `
   --cookies .\cookie.txt `
   --download audio,subtitles,cover `
   --snapshots smart `
   --asr-lang zh `
-  --if-exists overwrite
+  --prune-output
 ```
 
 产物：
 - 真实数据落盘：`library/<UP主>/<date_title_bvid>/`
-- 运行日志与失败列表：`discoveries/<timestamp>_collect_<name>/`
+- 报告与每视频日志：`discoveries/<timestamp>_collect_<name>/`
 
 ## 6. 导出“全集 txt”（按 UP 主或按主题）
 
@@ -246,16 +247,26 @@ python -m bilibili_get export --all --output-root .\output --library-root .\libr
 python .\scripts\prune_output_exported.py --output-root .\output --library-root .\library --execute
 ```
 
-## 7.5 体检与修复（doctor）
+## 7.5 体检与修复闭环（doctor + repair）
 
-扫描 library/ 找出缺转写/缺音频/空评论的视频，以及 output/ 未导出残留：
+**doctor 三账视图**（库内缺口 ∣ unavailable 终态 ∣ output 残留）：
 
 ```powershell
 python .\scripts\doctor.py --library-root .\library
 python .\scripts\doctor.py --write-targets   # 同时生成待修复 targets 文件
 ```
 
-修复方式：缺音频的用 `collect_targets.py --if-exists overwrite` 重抓；只缺转写的用 `asr-uploader`。
+**repair**（只修不抓——重抓永远走引擎）：
+
+```powershell
+python -m bilibili_get repair --library-root .\library --dry-run   # 预览
+python -m bilibili_get repair --library-root .\library --asr-device cuda --asr-compute float16
+# 有音频缺转写 -> 就地转写 + 重写 manifest（sha256 保持可信）
+# 缺音频/缺目录 -> 生成 targets_repair.txt 并打印现成 grab-targets 命令
+python -m bilibili_get repair --mark-unavailable BVxxxx --library-root .\library   # 手动终态出口
+```
+
+unavailable（已删除/充电专属/互动视频等）重试：`grab-* --include-unavailable`。
 
 ## 7.6 library 导航（分类浏览 + 索引）
 
@@ -275,6 +286,7 @@ python .\scripts\make_library_nav.py                                  # 生成 _
 - **cookie 失效预检**：run/批量启动时自动调 nav 检查登录态；失效会打 `[COOKIE WARN]`（space 相关命令直接中止，避免误导性的 -352）
 - **412 反爬**：音频下载 412 时提示更新 yt-dlp（`python -m pip install -U yt-dlp`）
 - **output 残留汇总**：run 结束若有"已采集未导出"的目录，打 `[LEFTOVER]` 提示用 export --all 补救
+- **失败账本**：`library/_ledger/failures.jsonl`（纯日志）与 `unavailable.jsonl`（唯一持久终态）；决策只看目录谓词，不看日志
 
 ## 8. 简体修复（对历史转写批量覆盖）
 
@@ -287,7 +299,7 @@ python .\scripts\simplify_transcripts_inplace.py --library-root .\library
 ## 9. 常见问题（FAQ）
 
 1) 出现 `SSL: UNEXPECTED_EOF_WHILE_READING`
-- B站/CDN 网络抖动常见，重试即可；批量建议用 `grab_uploader_new_isolated.py`（单条进程隔离 + 自动跳过已导出）。
+- B站/CDN 网络抖动常见，重试即可；批量用 `grab-uploader`/`grab-targets`（每视频独立子进程 + done 谓词自动跳过，重跑同命令即续传）。
 
 2) `--snapshots auto` 没有弹幕 / PBP peaks 为空怎么办？
 - 有些视频弹幕太少，PBP 接口会返回空数据（例如 debug 里提示 `not enough dm`）。

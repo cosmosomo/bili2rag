@@ -14,7 +14,9 @@ class TestBilibiliGetCli(unittest.TestCase):
         p.parse_args(["export", "--bvid", "BV15JqABoEvj"])
         p.parse_args(["search", "--keyword", "基础模型"])
         p.parse_args(["uploader", "--seed-bvid", "BV15JqABoEvj"])
-        p.parse_args(["asr-uploader", "--seed-bvid", "BV15JqABoEvj", "--limit", "1", "--process-limit", "1"])
+        p.parse_args(["grab-uploader", "--seed-bvid", "BV15JqABoEvj", "--new-limit", "1"])
+        p.parse_args(["grab-targets", "--targets-file", "x.txt", "--prune-output"])
+        p.parse_args(["repair", "--library-root", "library", "--dry-run"])
 
 
 if __name__ == "__main__":

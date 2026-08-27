@@ -99,7 +99,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument(
         "--write-targets",
         action="store_true",
-        help="为缺转写/缺音频的视频生成 targets 文件（BV + 目录名标题），可用 collect_targets.py 重抓",
+        help="为缺转写/缺音频的视频生成 targets 文件（BV + 目录名标题），可用 grab-targets 重抓",
     )
     args = parser.parse_args(argv)
 

@@ -8,8 +8,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-BN_LOCAL_MODEL_ROOT = Path(__file__).resolve().parents[1] / "BiliNote_win_v1.1.1" / "models" / "whisper"
-
 # OpenMP runtime duplication workaround on Windows (onnxruntime/ctranslate2)
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -59,17 +57,17 @@ class ASRConfig:
 
 
 def find_local_model_dir() -> Optional[Path]:
-    """Locate bundled faster-whisper snapshot if present."""
-    try:
-        snapshot_root = BN_LOCAL_MODEL_ROOT / "models--Systran--faster-whisper-base" / "snapshots"
-        if snapshot_root.exists():
-            for p in snapshot_root.iterdir():
-                if not p.is_dir():
-                    continue
-                if (p / "model.bin").exists() and (p / "config.json").exists():
-                    return p
-    except Exception:
-        pass
+    """Optional local model dir override (e.g. an offline whisper snapshot).
+
+    Checked from the BILI2RAG_WHISPER_MODEL_DIR env var; falls back to None so
+    load_model() uses the HuggingFace cache / default model name.
+    """
+    env = os.environ.get("BILI2RAG_WHISPER_MODEL_DIR")
+    if not env:
+        return None
+    p = Path(env)
+    if p.is_dir() and (p / "model.bin").exists() and (p / "config.json").exists():
+        return p
     return None
 
 

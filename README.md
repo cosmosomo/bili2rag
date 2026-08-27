@@ -46,17 +46,21 @@ bili2rag run --url BV15JqABoEvj --cookies cookie.txt --prune-output
 bili2rag run --url BV15JqABoEvj --cookies cookie.txt --asr-device cuda --asr-compute float16 --prune-output
 ```
 
-3. Bulk-fetch everything new from an uploader (one subprocess per video, auto-skips what's already exported):
+3. Bulk-fetch everything new from an uploader (one subprocess per video; done/partial/unavailable are skipped via the single completion predicate):
 
 ```powershell
-python scripts/grab_uploader_new_isolated.py --seed-bvid BV1ZnzhB2EXe --new-limit 0 --cookies cookie.txt --asr-device cuda --asr-compute float16 --prune-output
+python -m bilibili_get grab-uploader --seed-bvid BV1ZnzhB2EXe --new-limit 0 --cookies cookie.txt --asr-device cuda --asr-compute float16 --prune-output
+# or from a targets file (topics use this too):
+python -m bilibili_get grab-targets --targets-file path\to\targets.txt --prune-output
 ```
 
-4. Health-check your library and export "all transcripts" bundles:
+4. Health-check your library and close the recovery loop:
 
 ```powershell
-python scripts/doctor.py                    # find missing transcripts/audio/empty comments
-python scripts/export_txt_bundle.py --uploader "某UP主" --with-header --concat-all
+python scripts/doctor.py                    # three-account view: gaps / unavailable / leftovers
+python -m bilibili_get repair --library-root library --asr-device cuda --asr-compute float16
+                                           # in-place ASR for partials (manifest rewritten);
+                                           # prints a ready grab-targets command for refetches
 ```
 
 Full walkthrough (topics, snapshots, PBP, catalogs, category navigation, FAQ): **[docs/USAGE.md](docs/USAGE.md)**. Architecture & design decisions: **[docs/DESIGN.md](docs/DESIGN.md)**.
@@ -91,14 +95,14 @@ Not every feature needs a cookie. Check before troubleshooting:
 
 | Package | Role |
 |---|---|
-| `bilibili_get` | Low-entropy CLI entry: `run` (URL→harvest→ASR→export), `export`, `search`, `uploader`, `asr-uploader` |
+| `bilibili_get` | CLI entry: `run` (URL→harvest→ASR→export), `grab-uploader` / `grab-targets` (single batch engine), `repair`, `export`, `search`, `uploader` |
 | `bilibili_harvester` | yt-dlp based harvesting: metadata, audio/video/subtitles, danmaku, comments snapshot; signed playurl fallback |
 | `bilibili_asr` | faster-whisper transcription, per-page aggregation, Simplified-Chinese normalization |
 | `bilibili_search` | Search & uploader discovery: WBI signing, space listing with `-352` backoff, session/cookie handling |
 | `bilibili_enrich` | Optional enrichment: PBP (high-energy bar), videoshot snapshots |
-| `bilibili_library` | Export to readable dirs, NFO/manifest (sha256), naming, txt bundles |
+| `bilibili_library` | Export to readable dirs, NFO/manifest (sha256), naming, completion predicate, txt bundles |
 
-Plus `scripts/`: bulk grabbers, topic collection, doctor (library health), catalog & category navigation (`_by_category/` junctions + `INDEX.md`).
+Plus `scripts/`: topic collection (engine + pointer post-processing), doctor (library health), catalog & category navigation (`_by_category/` junctions + `INDEX.md`), txt bundle export.
 
 ## Library layout
 
