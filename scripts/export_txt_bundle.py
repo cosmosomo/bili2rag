@@ -172,11 +172,14 @@ def export_txt_bundle(
     with_header: bool,
     concat_all: bool,
     if_missing: str,
+    parts_cap: int = 0,
 ) -> Dict[str, Any]:
     """Export per-video transcript.txt into a single folder.
 
     - Writes one txt per video: <exported_dir_name>.txt
     - Optionally writes ALL.txt (concatenated).
+    - parts_cap > 0: ALSO writes <name>_partNN.txt volumes capped at parts_cap
+      chars, split at video boundaries only (LLM-context friendly).
     - Writes index.json with mapping.
     """
 
@@ -185,6 +188,7 @@ def export_txt_bundle(
 
     index: List[Dict[str, Any]] = []
     all_parts: List[str] = []
+    blocks: List[str] = []
     ok = 0
     missing = 0
 
@@ -216,12 +220,31 @@ def export_txt_bundle(
         }
         index.append(rec)
 
-        if concat_all:
-            all_parts.append(f"===== {e.title_dirname} =====\n")
-            all_parts.append(text.rstrip() + "\n\n")
+        if concat_all or parts_cap:
+            block = f"===== {e.title_dirname} =====\n" + text.rstrip() + "\n\n"
+            all_parts.append(block)
+            blocks.append(block)
 
     if concat_all:
         _write_text(dest_dir / "ALL.txt", "".join(all_parts))
+
+    if parts_cap and blocks:
+        stem = dest_dir.name
+        parts: List[List[str]] = []
+        cur: List[str] = []
+        cur_len = 0
+        for b in blocks:
+            if cur and cur_len + len(b) > parts_cap:
+                parts.append(cur)
+                cur, cur_len = [], 0
+            cur.append(b)
+            cur_len += len(b)
+        if cur:
+            parts.append(cur)
+        w = len(str(len(parts)))
+        for i, p in enumerate(parts, 1):
+            _write_text(dest_dir / f"{stem}_part{str(i).zfill(w)}.txt", "".join(p))
+        _print_utf8(f"[PARTS] {len(blocks)} 条 -> {len(parts)} 卷（每卷≤{parts_cap}字符，按视频边界切分）")
 
     _write_json(
         dest_dir / "index.json",
@@ -252,6 +275,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--dest-root", default="library/_exports/txt")
     parser.add_argument("--with-header", action="store_true", help="Prepend a small header to each exported txt.")
     parser.add_argument("--concat-all", action="store_true", help="Also write ALL.txt (concatenated).")
+    parser.add_argument(
+        "--parts-cap", type=int, default=0,
+        help="额外输出 <名>_partNN.txt 分卷，每卷≤N字符，仅在视频边界切分（如 32000 适配 32k 上下文）",
+    )
     parser.add_argument("--if-missing", choices=["fail", "skip"], default="skip")
     args = parser.parse_args(argv)
 
@@ -269,6 +296,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             with_header=bool(args.with_header),
             concat_all=bool(args.concat_all),
             if_missing=str(args.if_missing),
+            parts_cap=int(args.parts_cap),
         )
         _print_utf8(f"[OK] uploader={uploader} items={len(entries)} exported_ok={rep['ok']} missing={rep['missing']} dest={rep['dest_dir']}")
         raise SystemExit(0)
@@ -283,6 +311,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         with_header=bool(args.with_header),
         concat_all=bool(args.concat_all),
         if_missing=str(args.if_missing),
+        parts_cap=int(args.parts_cap),
     )
     _print_utf8(f"[OK] topic={topic} items={len(entries)} exported_ok={rep['ok']} missing={rep['missing']} dest={rep['dest_dir']}")
     raise SystemExit(0)

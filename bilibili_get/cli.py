@@ -152,6 +152,19 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--asr-lang", default=None)
     up.add_argument("--if-exists", choices=["fail", "skip", "overwrite"], default="skip")
 
+    grab_s = sub.add_parser(
+        "grab-search",
+        help="关键词搜索 → 引擎批量抓取（系统性调研一条命令：搜→筛→抓→转写）",
+    )
+    grab_s.add_argument("--keyword", required=True)
+    grab_s.add_argument("--search-limit", type=int, default=30, help="每个关键词最多取多少条结果")
+    grab_s.add_argument("--min-play", type=int, default=0, help="播放数下限过滤")
+    grab_s.add_argument("--min-seconds", type=int, default=0, help="时长下限（秒）")
+    grab_s.add_argument("--max-seconds", type=int, default=0, help="时长上限（秒，0=不限）")
+    grab_s.add_argument("--require-all", default="", help="标题必须包含的词（逗号分隔，任一命中即可的用 --require-any）")
+    grab_s.add_argument("--require-any", default="", help="标题至少包含其一的词（逗号分隔）")
+    _add_batch_pipeline_args(grab_s)
+
     grab_up = sub.add_parser(
         "grab-uploader",
         help="增量抓取某 UP 主新投稿（space 发现 → 引擎逐条子进程采集）",
@@ -164,6 +177,10 @@ def build_parser() -> argparse.ArgumentParser:
     grab_up.add_argument("--ps", type=int, default=30)
     grab_up.add_argument("--page-sleep", type=float, default=0.5)
     grab_up.add_argument("--discover-limit", type=int, default=50, help="发现最近 N 条投稿（0=不限制）")
+    grab_up.add_argument(
+        "--since-days", type=int, default=0,
+        help="只处理最近 N 天内的投稿（0=不限；周期性增量刷新用）",
+    )
     _add_batch_pipeline_args(grab_up)
 
     grab_t = sub.add_parser(
@@ -577,6 +594,63 @@ def _batch_config_from_args(args: argparse.Namespace, run_dir: Path) -> "BatchCo
     )
 
 
+def _grab_search_cmd(args: argparse.Namespace) -> int:
+    """Keyword research as one command: search head -> batch engine."""
+    from bilibili_search.search import VideoFilter, search_videos
+    from bilibili_search.session import build_web_session
+
+    from .orchestrate import BatchItem, run_batch
+
+    cookiefile = Path(args.cookies)
+    if cookiefile.exists() and _warn_if_cookie_stale(cookiefile, args.proxy):
+        _print_utf8("搜索接口依赖登录态，已中止。请先更新 cookie.txt 再重试。")
+        return 2
+    sess, _ = build_web_session(cookiefile if cookiefile.exists() else None, proxy=args.proxy)
+
+    flt = VideoFilter(
+        min_play=int(args.min_play),
+        min_duration_seconds=int(args.min_seconds),
+        max_duration_seconds=int(args.max_seconds) or 0,
+    )
+    items_found = search_videos(
+        sess,
+        keyword=args.keyword,
+        order="totalrank",
+        duration=0,
+        tids=0,
+        limit=int(args.search_limit),
+        max_pages=0,
+        page_sleep=1.5,
+        flt=flt,
+    )
+
+    require_all = [t.strip().lower() for t in args.require_all.split(",") if t.strip()]
+    require_any = [t.strip().lower() for t in args.require_any.split(",") if t.strip()]
+    items: List[BatchItem] = []
+    for it in items_found:
+        title = (it.title_plain or it.title or "").strip()
+        low = title.lower()
+        if require_all and not all(t in low for t in require_all):
+            continue
+        if require_any and not any(t in low for t in require_any):
+            continue
+        items.append(BatchItem(bvid=it.bvid, title=title))
+
+    import re as _re
+
+    safe_kw = _re.sub(r"[^\w\u4e00-\u9fff]+", "_", args.keyword)[:40]
+    run_dir = Path(args.out_dir) / f"{_utc_now_compact()}_search_{safe_kw}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "targets.txt").write_text(
+        "\n".join(f"【{i.title}】https://www.bilibili.com/video/{i.bvid}" for i in items) + ("\n" if items else ""),
+        encoding="utf-8",
+    )
+    _print_utf8(f"[SEARCH] keyword={args.keyword!r} hits={len(items_found)} kept={len(items)} dir={run_dir}")
+
+    report = run_batch(items, _batch_config_from_args(args, run_dir))
+    return report.exit_code()
+
+
 def _grab_uploader_cmd(args: argparse.Namespace) -> int:
     if bool(args.seed_bvid) == bool(args.mid):
         _print_utf8("请指定 --seed-bvid 或 --mid（二选一）")
@@ -619,7 +693,14 @@ def _grab_uploader_cmd(args: argparse.Namespace) -> int:
         page_sleep=max(float(args.page_sleep), 0.0),
         ps=max(int(args.ps), 1),
     )
-    items = [BatchItem(bvid=it.bvid, title=it.title) for it in items_found]
+    found = items_found
+    if args.since_days and int(args.since_days) > 0:
+        import time as _time
+
+        cutoff = _time.time() - int(args.since_days) * 86400
+        found = [it for it in items_found if (it.created or 0) >= cutoff]
+        _print_utf8(f"[SINCE] --since-days={args.since_days}: {len(items_found)} -> {len(found)}")
+    items = [BatchItem(bvid=it.bvid, title=it.title) for it in found]
 
     safe_owner = sanitize_component(owner_name or str(owner_mid), max_len=60)
     safe_kw = sanitize_component(args.keyword, max_len=60) if args.keyword else "all"
@@ -699,6 +780,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(_grab_uploader_cmd(args))
     if args.cmd == "grab-targets":
         sys.exit(_grab_targets_cmd(args))
+    if args.cmd == "grab-search":
+        sys.exit(_grab_search_cmd(args))
     if args.cmd == "repair":
         sys.exit(_repair_cmd(args))
     if args.cmd == "search":

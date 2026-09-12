@@ -333,6 +333,18 @@ def run_batch(items: List[BatchItem], cfg: BatchConfig) -> BatchReport:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 list(pool.map(fetch_one, pending))
 
+    # ---- phase 2.5: one automatic retry round for transient failures (SSL etc.)
+    retry_items = [BatchItem(bvid=f["bvid"]) for f in report.failed if f.get("stage") in ("subprocess", "no_audio_after_run", "subprocess_start")]
+    if retry_items and not cfg.fail_fast:
+        report.failed = [f for f in report.failed if f["bvid"] not in {r.bvid for r in retry_items}]
+        _print_utf8(f"[RETRY] {len(retry_items)} 条瞬时失败自动重试一轮")
+        if workers == 1:
+            for it in retry_items:
+                fetch_one(it)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(fetch_one, retry_items))
+
     # ---- phase 3: deferred ASR sweep (ONE model load; CC subtitles bypass whisper)
     asr_fixed = 0
     if cfg.defer_asr and not cfg.no_asr:

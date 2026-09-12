@@ -55,6 +55,8 @@ class ASRConfig:
     compute_type: str = "int8"  # int8|float16|float32|auto
     language: Optional[str] = None  # e.g. "zh"
     prefer_subtitle: bool = True  # use existing zh CC subtitles instead of whisper
+    no_batch: bool = False  # disable BatchedInferencePipeline even on cuda
+    batch_size: int = 8  # batched pipeline batch size (cuda only)
 
 
 _MODEL_CACHE: Dict[tuple, Any] = {}
@@ -93,7 +95,13 @@ def _load_model_uncached(cfg: ASRConfig):
     model_ref: str | Path
     if cfg.model in (None, "auto"):
         local_dir = find_local_model_dir()
-        model_ref = local_dir if local_dir else "base"
+        if local_dir:
+            model_ref = local_dir
+        else:
+            # Smart default: CC bypass already covers most videos for free,
+            # so whisper only handles the minority — spend GPU on quality.
+            # CPU keeps base for speed.
+            model_ref = "small" if (cfg.device or "cpu") == "cuda" else "base"
     else:
         model_ref = cfg.model
 
@@ -373,15 +381,38 @@ def transcribe_to_dir(audio_path: Path, out_dir: Path, cfg: ASRConfig) -> Dict[s
     start_ts = time.monotonic()
     start_at = now_iso()
     (model, model_ref) = load_model(cfg)
-    log(f"ASR start audio={audio_path.name} model={model_ref} device={cfg.device} compute={cfg.compute_type} lang={cfg.language}")
+
+    # Batched inference on CUDA: 2-4x on long audio (faster-whisper >=1.1).
+    batched = None
+    if (cfg.device or "cpu") == "cuda" and not getattr(cfg, "no_batch", False):
+        try:
+            from faster_whisper import BatchedInferencePipeline  # type: ignore
+
+            batched = BatchedInferencePipeline(model=model)
+        except Exception:
+            batched = None
+
+    log(
+        f"ASR start audio={audio_path.name} model={model_ref} device={cfg.device} "
+        f"compute={cfg.compute_type} lang={cfg.language} batched={batched is not None}"
+    )
 
     # Perform transcription
-    segments_iter, info = model.transcribe(
-        str(audio_path),
-        language=cfg.language,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
-    )
+    if batched is not None:
+        segments_iter, info = batched.transcribe(
+            str(audio_path),
+            language=cfg.language,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+            batch_size=int(getattr(cfg, "batch_size", 8) or 8),
+        )
+    else:
+        segments_iter, info = model.transcribe(
+            str(audio_path),
+            language=cfg.language,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+        )
 
     segs: List[Dict[str, Any]] = []
     for seg in segments_iter:
