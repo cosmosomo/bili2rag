@@ -15,6 +15,7 @@ from bilibili_library.completion import (
 
 def _cfg(tmp_path: Path, **kw) -> BatchConfig:
     run_dir = tmp_path / "run"
+    kw.setdefault("defer_asr", False)  # legacy inline semantics for these tests
     return BatchConfig(
         run_dir=run_dir,
         cookies=str(tmp_path / "cookie.txt"),

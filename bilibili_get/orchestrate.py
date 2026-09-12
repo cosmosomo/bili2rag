@@ -75,6 +75,9 @@ class BatchConfig:
     fail_fast: bool = False
     new_limit: int = 0
     include_unavailable: bool = False
+    keep_audio: bool = False
+    fetch_workers: int = 2
+    defer_asr: bool = True  # fetch without ASR, then one single-model sweep
 
 
 @dataclass
@@ -145,10 +148,14 @@ def build_run_cmd(cfg: BatchConfig, bvid: str, *, if_exists_override: Optional[s
         cmd.extend(["--proxy", cfg.proxy])
     if cfg.no_asr:
         cmd.append("--no-asr")
+    elif cfg.defer_asr:
+        cmd.append("--no-asr")  # ASR happens in the single-model sweep afterwards
     if cfg.no_export:
         cmd.append("--no-export")
     if cfg.asr_lang:
         cmd.extend(["--asr-lang", cfg.asr_lang])
+    if cfg.keep_audio:
+        cmd.append("--keep-audio")
     if cfg.prune_output:
         cmd.append("--prune-output")
     return cmd
@@ -191,6 +198,9 @@ def _salvage(cfg: BatchConfig, bvid: str) -> Optional[Path]:
 
 
 def run_batch(items: List[BatchItem], cfg: BatchConfig) -> BatchReport:
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     library_root = Path(cfg.library_root)
     logs_dir = cfg.run_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -198,11 +208,12 @@ def run_batch(items: List[BatchItem], cfg: BatchConfig) -> BatchReport:
 
     unavailable = list_unavailable(library_root)
     report = BatchReport(discovered=len(items))
+    lock = threading.Lock()
 
+    # ---- phase 1: single-threaded pre-filter (skip decisions, new-limit cut)
+    pending: List[BatchItem] = []
     for item in items:
         bvid = item.bvid
-        title = item.title
-
         vdir = find_video_dir(library_root, bvid)
         state = classify(vdir)
         if state == "ok":
@@ -211,97 +222,158 @@ def run_batch(items: List[BatchItem], cfg: BatchConfig) -> BatchReport:
             continue
         if state == "no_transcript_with_audio":
             append_failure(
-                library_root,
-                bvid=bvid,
-                stage="partial_asr",
+                library_root, bvid=bvid, stage="partial_asr",
                 error="audio present, transcript missing (await repair)",
-                title=title,
-                run_id=run_id,
+                title=item.title, run_id=run_id,
             )
             report.skipped_partial.append(bvid)
-            _print_utf8(f"[SKIP] {bvid} partial (has audio, no transcript) -> repair")
+            _print_utf8(f"[SKIP] {bvid} partial (has audio, no transcript) -> sweep/repair")
             continue
         if (bvid in unavailable) and not cfg.include_unavailable:
             report.skipped_unavailable.append(bvid)
             _print_utf8(f"[SKIP] {bvid} unavailable")
             continue
-        if cfg.new_limit and len(report.exported) >= int(cfg.new_limit):
-            _print_utf8(f"[STOP] reached --new-limit={cfg.new_limit} (exported={len(report.exported)})")
-            break
+        pending.append(item)
 
+    if cfg.new_limit and len(pending) > int(cfg.new_limit):
+        pending = pending[: int(cfg.new_limit)]
+        _print_utf8(f"[CUT] --new-limit={cfg.new_limit}: fetching first {len(pending)}")
+
+    # ---- phase 2: parallel fetch (per-video subprocess isolation preserved)
+    def fetch_one(item: BatchItem) -> None:
+        bvid = item.bvid
+        title = item.title
+        vdir = find_video_dir(library_root, bvid)
         log_path = logs_dir / f"{bvid}.log"
         _print_utf8(f"[RUN] {bvid} {title}".rstrip())
-        # If an incomplete dir already exists, `skip` would silently discard
-        # the fresh harvest (export skipped + output pruned) — force overwrite.
+        # An incomplete existing dir + skip would discard the fresh harvest.
         if_exists_override = "overwrite" if vdir is not None else None
         cmd = build_run_cmd(cfg, bvid, if_exists_override=if_exists_override)
         try:
             with log_path.open("w", encoding="utf-8") as f:
                 p = subprocess.run(cmd, cwd=str(_REPO_ROOT), stdout=f, stderr=subprocess.STDOUT)
         except Exception as e:
-            rec = {"bvid": bvid, "stage": "subprocess_start", "error": str(e)}
-            report.failed.append(rec)
-            append_failure(library_root, bvid=bvid, stage="subprocess_start", error=str(e), title=title, run_id=run_id)
+            with lock:
+                report.failed.append({"bvid": bvid, "stage": "subprocess_start", "error": str(e)})
+                append_failure(library_root, bvid=bvid, stage="subprocess_start", error=str(e), title=title, run_id=run_id)
             _print_utf8(f"[FAIL] start {bvid}: {e}")
-            if cfg.fail_fast:
-                break
-            continue
+            return
 
         salvaged: Optional[Path] = None
         if p.returncode != 0:
-            # The subprocess may crash mid-pipeline while having already
-            # exported (overwrite) or left a salvageable output dir. Both are
-            # settled by the unified final-state classification below.
-            salvaged = _salvage(cfg, bvid)
+            with lock:  # salvage exports into the shared library; serialize
+                salvaged = _salvage(cfg, bvid)
 
         final_dir = find_video_dir(library_root, bvid)
         state = classify(final_dir)
-        if state == CLASS_OK:
-            report.exported.append(bvid)
+        has_cc = False
+        if state not in (CLASS_OK, CLASS_NO_TRANSCRIPT_WITH_AUDIO) and final_dir is not None:
+            try:
+                from bilibili_asr.asr import find_cc_subtitle
+
+                has_cc = find_cc_subtitle(final_dir) is not None
+            except Exception:
+                has_cc = False
+        if has_cc:
+            # Lean fetch: zh CC subtitle present, audio intentionally skipped.
+            # The deferred sweep will materialize the transcript from it.
+            with lock:
+                append_failure(
+                    library_root, bvid=bvid, stage="partial_asr",
+                    error="lean fetch (cc subtitle, no audio); transcript deferred", title=title, run_id=run_id,
+                )
+                report.skipped_partial.append(bvid)
+            _print_utf8(f"[FETCHED] {bvid} (lean: cc subtitle, transcript deferred)")
+        elif state == CLASS_OK:
+            with lock:
+                report.exported.append(bvid)
             tag = " (salvaged)" if salvaged is not None else ""
             _print_utf8(f"[OK] {bvid}{tag} -> {final_dir}")
         elif state == CLASS_NO_TRANSCRIPT_WITH_AUDIO:
-            append_failure(
-                library_root, bvid=bvid, stage="partial_asr",
-                error=f"returncode={p.returncode}, no transcript after run", title=title, run_id=run_id,
-            )
-            report.skipped_partial.append(bvid)
-            _print_utf8(f"[PARTIAL] {bvid} exported without transcript -> repair")
-        else:
-            # No audio at all: the stream is unavailable. Check the log even
-            # on rc==0 — harvest logs yt-dlp -87008 warnings without failing.
-            if _log_says_unavailable(log_path):
-                mark_unavailable(library_root, bvid, reason=f"auto: no audio; returncode={p.returncode} (404/403/-87008)")
-                unavailable[bvid] = {"bvid": bvid}
+            with lock:
                 append_failure(
-                    library_root, bvid=bvid, stage="unavailable",
-                    error=f"no audio; returncode={p.returncode}", title=title, run_id=run_id,
+                    library_root, bvid=bvid, stage="partial_asr",
+                    error=f"returncode={p.returncode}, no transcript after fetch", title=title, run_id=run_id,
                 )
-                report.skipped_unavailable.append(bvid)
+                report.skipped_partial.append(bvid)
+            _print_utf8(f"[FETCHED] {bvid} (transcript deferred)")
+        else:
+            if _log_says_unavailable(log_path):
+                with lock:
+                    mark_unavailable(library_root, bvid, reason=f"auto: no audio; returncode={p.returncode} (404/403/-87008)")
+                    unavailable[bvid] = {"bvid": bvid}
+                    append_failure(
+                        library_root, bvid=bvid, stage="unavailable",
+                        error=f"no audio; returncode={p.returncode}", title=title, run_id=run_id,
+                    )
+                    report.skipped_unavailable.append(bvid)
                 _print_utf8(f"[UNAVAILABLE] {bvid} no audio; marked (will skip in future runs)")
-                continue
-            rec = {
-                "bvid": bvid,
-                "stage": "subprocess" if p.returncode != 0 else "no_audio_after_run",
-                "returncode": p.returncode,
-                "log": str(log_path),
-            }
-            report.failed.append(rec)
-            append_failure(
-                library_root, bvid=bvid, stage=rec["stage"],
-                error=f"returncode={p.returncode} log={log_path}", title=title, run_id=run_id,
-            )
-            _print_utf8(f"[FAIL] {bvid} returncode={p.returncode} log={log_path}")
-            if cfg.fail_fast:
-                break
-            continue
+            else:
+                rec = {
+                    "bvid": bvid,
+                    "stage": "subprocess" if p.returncode != 0 else "no_audio_after_run",
+                    "returncode": p.returncode,
+                    "log": str(log_path),
+                }
+                with lock:
+                    report.failed.append(rec)
+                    append_failure(
+                        library_root, bvid=bvid, stage=rec["stage"],
+                        error=f"returncode={p.returncode} log={log_path}", title=title, run_id=run_id,
+                    )
+                _print_utf8(f"[FAIL] {bvid} returncode={p.returncode} log={log_path}")
         _sleep(cfg)
+
+    workers = max(1, int(cfg.fetch_workers or 1))
+    if pending:
+        if workers == 1:
+            for it in pending:
+                fetch_one(it)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(fetch_one, pending))
+
+    # ---- phase 3: deferred ASR sweep (ONE model load; CC subtitles bypass whisper)
+    asr_fixed = 0
+    if cfg.defer_asr and not cfg.no_asr:
+        candidates = list(dict.fromkeys(report.exported + report.skipped_partial))
+        if candidates:
+            _print_utf8(f"[ASR-SWEEP] {len(candidates)} 条待转写（模型单次加载；有CC字幕的零GPU直出）")
+            from bilibili_asr.asr import ASRConfig, transcribe_bvid_dir
+            from bilibili_library.exporter import rewrite_manifest
+
+            asr_cfg = ASRConfig(
+                model=cfg.asr_model, device=cfg.asr_device, compute_type=cfg.asr_compute,
+                language=cfg.asr_lang, prefer_subtitle=True,
+            )
+            for bvid in candidates:
+                vdir = find_video_dir(library_root, bvid)
+                if vdir is None or classify(vdir) == "ok":
+                    continue
+                try:
+                    rep = transcribe_bvid_dir(vdir, asr_cfg, merge_pages=True, fail_fast=False)
+                    rewrite_manifest(vdir)
+                    asr_fixed += 1
+                    mode = rep.get("mode", "?")
+                    with lock:
+                        if bvid in report.skipped_partial:
+                            report.skipped_partial.remove(bvid)
+                        if bvid not in report.exported:
+                            report.exported.append(bvid)
+                    _print_utf8(f"[ASR OK] {bvid} mode={mode} (manifest rewritten)")
+                except Exception as e:
+                    append_failure(
+                        library_root, bvid=bvid, stage="partial_asr",
+                        error=f"deferred asr fail: {e}", run_id=run_id,
+                    )
+                    _print_utf8(f"[ASR FAIL] {bvid} reason={e}")
 
     _write_report(cfg.run_dir, report)
     _print_utf8(
         f"[DONE] discovered={report.discovered} exported={len(report.exported)} "
         f"skipped_done={len(report.skipped_done)} partial={len(report.skipped_partial)} "
-        f"unavailable={len(report.skipped_unavailable)} failed={len(report.failed)} dir={cfg.run_dir}"
+        f"unavailable={len(report.skipped_unavailable)} failed={len(report.failed)} "
+        f"asr_fixed={asr_fixed} dir={cfg.run_dir}"
     )
     return report
 

@@ -65,6 +65,12 @@ python -m bilibili_get repair --library-root library --asr-device cuda --asr-com
 
 Full walkthrough (topics, snapshots, PBP, catalogs, category navigation, FAQ): **[docs/USAGE.md](docs/USAGE.md)**. Architecture & design decisions: **[docs/DESIGN.md](docs/DESIGN.md)**.
 
+## Fast by default (v0.2.1+)
+
+- **CC-subtitle bypass** — if a zh subtitle was harvested, transcripts are materialized from it directly (better than whisper-base, zero GPU) and audio download is skipped (`--keep-audio` to disable).
+- **Deferred ASR sweep** — batch fetching runs without inline ASR; one single-model sweep afterwards transcribes everything (model loads once per batch, not per video).
+- **Parallel fetch** — 2 concurrent per-video subprocesses by default (`--fetch-workers`, keep ≤3 for risk-control friendliness).
+
 ## Cookie & access matrix
 
 Not every feature needs a cookie. Check before troubleshooting:

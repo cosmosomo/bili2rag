@@ -54,6 +54,17 @@ class ASRConfig:
     device: str = "cpu"  # "cpu" | "cuda"
     compute_type: str = "int8"  # int8|float16|float32|auto
     language: Optional[str] = None  # e.g. "zh"
+    prefer_subtitle: bool = True  # use existing zh CC subtitles instead of whisper
+
+
+_MODEL_CACHE: Dict[tuple, Any] = {}
+
+
+def _load_model_cached(cfg: ASRConfig):
+    key = (str(cfg.model), cfg.device, cfg.compute_type)
+    if key not in _MODEL_CACHE:
+        _MODEL_CACHE[key] = _load_model_uncached(cfg)
+    return _MODEL_CACHE[key]
 
 
 def find_local_model_dir() -> Optional[Path]:
@@ -71,7 +82,7 @@ def find_local_model_dir() -> Optional[Path]:
     return None
 
 
-def load_model(cfg: ASRConfig):
+def _load_model_uncached(cfg: ASRConfig):
     try:
         from faster_whisper import WhisperModel
     except Exception as e:  # pragma: no cover
@@ -91,6 +102,12 @@ def load_model(cfg: ASRConfig):
     device = cfg.device or "cpu"
 
     return WhisperModel(str(model_ref), device=device, compute_type=compute_type), str(model_ref)
+
+
+def load_model(cfg: ASRConfig):
+    """Cached loader: one model instance per (model, device, compute) — batches
+    that transcribe many videos pay the load cost once instead of per-video."""
+    return _load_model_cached(cfg)
 
 
 def pick_audio_file(bvid_dir: Path, explicit: Optional[Path] = None) -> Path:
@@ -151,6 +168,26 @@ def transcribe_bvid_dir(
     if not bvid_dir.exists():
         raise FileNotFoundError(str(bvid_dir))
 
+    # CC-subtitle bypass: uploader/AI zh subtitles beat whisper-base quality
+    # and cost zero GPU. Same output contract, provenance recorded.
+    if getattr(cfg, "prefer_subtitle", True):
+        try:
+            sub = find_cc_subtitle(bvid_dir)
+        except Exception:
+            sub = None
+        if sub is not None:
+            try:
+                res = write_asr_from_subtitle(sub, bvid_dir / "asr", source="cc:" + sub.name)
+                logs_dir = bvid_dir / "logs"
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                (logs_dir / "asr_run.json").write_text(
+                    json.dumps({"mode": "cc_subtitle", **res}, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                return {"mode": "cc_subtitle", "bvid_dir": str(bvid_dir), "runs": [{"ok": True, **res}], "merged": {}}
+            except Exception:
+                pass  # fall through to whisper
+
     page_dirs = _iter_page_dirs(bvid_dir)
     runs: List[Dict[str, Any]] = []
 
@@ -205,6 +242,90 @@ def transcribe_bvid_dir(
     asr_dir = bvid_dir / "asr"
     result = transcribe_to_dir(audio_path, asr_dir, cfg)
     return {"mode": "single", "bvid_dir": str(bvid_dir), "runs": [{"ok": True, **result}], "merged": {}}
+
+
+import re as _re
+
+_SRT_TS = _re.compile(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})")
+
+
+def parse_srt(path: Path) -> List[Dict[str, Any]]:
+    """Parse an .srt file into segments [{start, end, text}]."""
+    segs: List[Dict[str, Any]] = []
+    text_buf: List[str] = []
+    start = end = 0.0
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        m = _SRT_TS.search(line)
+        if m:
+            if text_buf:
+                segs.append({"start": start, "end": end, "text": " ".join(text_buf).strip()})
+                text_buf = []
+            g = [int(x) for x in m.groups()]
+            start = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000.0
+            end = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000.0
+            continue
+        s = line.strip()
+        if not s or s.isdigit():
+            continue
+        text_buf.append(s)
+    if text_buf:
+        segs.append({"start": start, "end": end, "text": " ".join(text_buf).strip()})
+    return [s for s in segs if s["text"]]
+
+
+def find_cc_subtitle(bvid_dir: Path) -> Optional[Path]:
+    """Locate the best zh subtitle file: uploader CC preferred over ai-zh.
+
+    Looks in <dir>/subtitles/ and <dir>/ for *.srt.
+    """
+    candidates: List[Path] = []
+    for sub in (bvid_dir / "subtitles", bvid_dir):
+        if not sub.is_dir():
+            continue
+        candidates.extend(p for p in sub.glob("*.srt") if p.is_file())
+    if not candidates:
+        return None
+
+    def rank(p: Path) -> tuple:
+        n = p.name.lower()
+        is_ai = "ai-zh" in n or "ai_zh" in n or n.startswith("ai")
+        is_zh = ("zh" in n) or ("中文" in p.name)
+        return (0 if (is_zh and not is_ai) else 1 if is_zh else 2, len(p.name))
+
+    best = min(candidates, key=rank)
+    if rank(best)[0] == 2:  # no zh track at all
+        return None
+    return best
+
+
+def _to_simplified(text: str) -> str:
+    try:
+        from hanziconv import HanziConv  # type: ignore
+        return HanziConv.toSimplified(text)
+    except Exception:
+        return text
+
+
+def write_asr_from_subtitle(sub_path: Path, out_dir: Path, *, source: str) -> Dict[str, Any]:
+    """Materialize asr/ outputs (transcript.txt/.srt/segments.json) from a CC subtitle.
+
+    Same output contract as transcribe_to_dir, with provenance recorded —
+    real subtitle data, never faked timings.
+    """
+    segs = parse_srt(sub_path)
+    if not segs:
+        raise ValueError(f"subtitle parsed to empty: {sub_path}")
+    for s in segs:
+        s["text"] = _to_simplified(s["text"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "segments.json").write_text(
+        json.dumps({"language": "zh", "source": source, "segments": segs}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    full_text = " ".join(s["text"].strip() for s in segs if s.get("text"))
+    (out_dir / "transcript.txt").write_text(full_text.strip() + "\n", encoding="utf-8")
+    (out_dir / "transcript.srt").write_text(segments_to_srt(segs), encoding="utf-8")
+    return {"segments": len(segs), "source": source, "subtitle": str(sub_path)}
 
 
 def segments_to_srt(segments: Iterable[Dict[str, Any]]) -> str:

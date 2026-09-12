@@ -53,6 +53,18 @@ def _add_batch_pipeline_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--new-limit", type=int, default=0, help="本次最多处理多少条新增（0=不限制）")
     parser.add_argument("--include-unavailable", action="store_true", help="重试已标记 unavailable 的视频")
+    parser.add_argument(
+        "--keep-audio", action="store_true",
+        help="禁用瘦身模式：即使已有中文字幕也照常下载音频（默认有 CC 字幕时跳过音频）",
+    )
+    parser.add_argument(
+        "--fetch-workers", type=int, default=2,
+        help="并行抓取子进程数（默认 2；对站点温和，勿超 3）",
+    )
+    parser.add_argument(
+        "--no-defer-asr", action="store_true",
+        help="关闭延迟转写（默认：抓取阶段不带 ASR，结束后单模型集中转写，速度更快）",
+    )
     parser.add_argument("--out-dir", default="discoveries")
 
 
@@ -85,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-asr", action="store_true", help="关闭 ASR（仅采集+可选导出）")
     run.add_argument("--export", action="store_true", help="启用导出（默认启用；配合 --no-export 可关闭）")
     run.add_argument("--no-export", action="store_true", help="关闭导出（仅采集+可选 ASR）")
+    run.add_argument("--keep-audio", action="store_true", help="禁用瘦身模式（有中文字幕仍下载音频）")
     run.add_argument("--if-exists", choices=["fail", "skip", "overwrite"], default="skip", help="导出目录已存在时策略")
     run.add_argument("--prune-output", action="store_true", help="导出成功后删除 output/<bvid>/，节省空间（以 library/ 为唯一真源）")
     run.add_argument("--asr-device", default="cpu", help="cpu|cuda（默认 cpu）")
@@ -281,6 +294,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
                     download_set=download_set,
                     proxy=args.proxy,
                     comment_pages=args.comment_pages,
+                    keep_audio=bool(getattr(args, "keep_audio", False)),
                 )
                 bvid = str(r.get("bvid") or "unknown")
                 bvid_dir = Path(str(r.get("outdir") or (out_root / bvid))).resolve()
@@ -557,6 +571,9 @@ def _batch_config_from_args(args: argparse.Namespace, run_dir: Path) -> "BatchCo
         fail_fast=bool(args.fail_fast),
         new_limit=int(args.new_limit),
         include_unavailable=bool(args.include_unavailable),
+        keep_audio=bool(getattr(args, "keep_audio", False)),
+        fetch_workers=int(getattr(args, "fetch_workers", 2) or 1),
+        defer_asr=not bool(getattr(args, "no_defer_asr", False)),
     )
 
 

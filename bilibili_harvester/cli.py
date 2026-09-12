@@ -35,7 +35,7 @@ def _print_utf8(line: str) -> None:
     sys.stdout.buffer.write((line + "\n").encode("utf-8", errors="replace"))
 
 
-def harvest_one(url: str, cookiefile: Optional[Path], out_root: Path, structured_root: Optional[Path], download_set: set[str], proxy: Optional[str], comment_pages: int) -> Dict[str, Any]:
+def harvest_one(url: str, cookiefile: Optional[Path], out_root: Path, structured_root: Optional[Path], download_set: set[str], proxy: Optional[str], comment_pages: int, keep_audio: bool = False) -> Dict[str, Any]:
     start_ts = time.monotonic()
     start_at = _now_iso()
     original_url = url
@@ -283,6 +283,24 @@ def harvest_one(url: str, cookiefile: Optional[Path], out_root: Path, structured
         except Exception as e:
             steps.append({"name": "download_subtitles", "ok": False, "error": str(e), "duration": round(time.monotonic() - t, 3)})
             log(f"Step download_subtitles: FAIL {e}")
+
+    # 2.5) lean mode: zh CC subtitle already fetched -> skip audio download
+    def _cc_skip_audio() -> bool:
+        if keep_audio or "audio" not in download_set:
+            return False
+        try:
+            from bilibili_asr.asr import find_cc_subtitle
+
+            if find_cc_subtitle(outdir) is not None:
+                download_set.discard("audio")
+                log("Lean mode: zh CC subtitle present -> skip audio download")
+                steps.append({"name": "lean_skip_audio", "ok": True, "detail": "cc subtitle present"})
+                return True
+        except Exception as e:
+            log(f"Lean mode check FAIL (fallback to audio): {e}")
+        return False
+
+    _cc_skip_audio()
 
     # 3) audio
     audio_path: Optional[Path] = None
