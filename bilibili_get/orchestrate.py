@@ -29,6 +29,7 @@ from bilibili_library.completion import (
     CLASS_NO_TRANSCRIPT_WITH_AUDIO,
     CLASS_OK,
     append_failure,
+    build_video_index,
     classify,
     find_video_dir,
     is_done,
@@ -209,12 +210,13 @@ def run_batch(items: List[BatchItem], cfg: BatchConfig) -> BatchReport:
     unavailable = list_unavailable(library_root)
     report = BatchReport(discovered=len(items))
     lock = threading.Lock()
+    vindex = build_video_index(library_root)  # one pass, refreshed on export
 
     # ---- phase 1: single-threaded pre-filter (skip decisions, new-limit cut)
     pending: List[BatchItem] = []
     for item in items:
         bvid = item.bvid
-        vdir = find_video_dir(library_root, bvid)
+        vdir = vindex.get(bvid)
         state = classify(vdir)
         if state == "ok":
             report.skipped_done.append(bvid)
@@ -243,7 +245,7 @@ def run_batch(items: List[BatchItem], cfg: BatchConfig) -> BatchReport:
     def fetch_one(item: BatchItem) -> None:
         bvid = item.bvid
         title = item.title
-        vdir = find_video_dir(library_root, bvid)
+        vdir = vindex.get(bvid)
         log_path = logs_dir / f"{bvid}.log"
         _print_utf8(f"[RUN] {bvid} {title}".rstrip())
         # An incomplete existing dir + skip would discard the fresh harvest.
@@ -263,8 +265,17 @@ def run_batch(items: List[BatchItem], cfg: BatchConfig) -> BatchReport:
         if p.returncode != 0:
             with lock:  # salvage exports into the shared library; serialize
                 salvaged = _salvage(cfg, bvid)
+            if salvaged is not None:
+                vindex[bvid] = salvaged
 
-        final_dir = find_video_dir(library_root, bvid)
+        # Refresh the index entry once (export dir name comes from metadata,
+        # so it is only knowable after the subprocess finishes).
+        final_dir = vindex.get(bvid)
+        if final_dir is None or not is_done(final_dir):
+            fresh = find_video_dir(library_root, bvid)
+            if fresh is not None:
+                final_dir = fresh
+                vindex[bvid] = fresh
         state = classify(final_dir)
         has_cc = False
         if state not in (CLASS_OK, CLASS_NO_TRANSCRIPT_WITH_AUDIO) and final_dir is not None:
@@ -359,7 +370,7 @@ def run_batch(items: List[BatchItem], cfg: BatchConfig) -> BatchReport:
                 language=cfg.asr_lang, prefer_subtitle=True,
             )
             for bvid in candidates:
-                vdir = find_video_dir(library_root, bvid)
+                vdir = vindex.get(bvid)
                 if vdir is None or classify(vdir) == "ok":
                     continue
                 try:

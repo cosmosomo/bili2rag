@@ -96,8 +96,27 @@ def iter_video_dirs(library_root: Path) -> Iterator[Path]:
                 yield v_dir
 
 
-def find_video_dir(library_root: Path, bvid: str) -> Optional[Path]:
-    """Locate the library video dir for a bvid (two-level scan, service dirs skipped)."""
+def build_video_index(library_root: Path) -> Dict[str, Path]:
+    """One-pass bvid -> video_dir index for batch operations.
+
+    find_video_dir scans the whole library per call (O(items x library));
+    batches should build this once and refresh entries as they export.
+    """
+    idx: Dict[str, Path] = {}
+    for v_dir in iter_video_dirs(library_root):
+        bvid = extract_bvid_from_dirname(v_dir.name)
+        if bvid and bvid not in idx:
+            idx[bvid] = v_dir
+    return idx
+
+
+def find_video_dir(library_root: Path, bvid: str, *, index: Optional[Dict[str, Path]] = None) -> Optional[Path]:
+    """Locate the library video dir for a bvid (two-level scan, service dirs skipped).
+
+    Pass `index` from build_video_index to avoid the O(library) scan.
+    """
+    if index is not None:
+        return index.get(bvid)
     if not library_root.is_dir():
         return None
     for v_dir in iter_video_dirs(library_root):

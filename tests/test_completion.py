@@ -70,6 +70,17 @@ def test_find_video_dir_skips_service_dirs(tmp_path: Path) -> None:
     assert find_video_dir(tmp_path, "BV3333333333") is not None
 
 
+def test_build_video_index_matches_find(tmp_path: Path) -> None:
+    _mk_video(tmp_path, "a_BV7777777777", transcript=True, audio=True)
+    _mk_video(tmp_path, "b_BV8888888888", audio=True)
+    (tmp_path / "_by_category" / "cat").mkdir(parents=True)
+    idx = __import__("bilibili_library.completion", fromlist=["build_video_index"]).build_video_index(tmp_path)
+    assert set(idx) == {"BV7777777777", "BV8888888888"}
+    for bvid, d in idx.items():
+        assert d == find_video_dir(tmp_path, bvid)  # index == scan result
+        assert find_video_dir(tmp_path, bvid, index=idx) is d  # index fast-path
+
+
 def test_ledger_failure_roundtrip(tmp_path: Path) -> None:
     assert read_failures(tmp_path) == []
     append_failure(tmp_path, bvid="BV1", stage="subprocess", error="rc=1", title="t", run_id="r1")
