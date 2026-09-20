@@ -201,6 +201,15 @@ def build_parser() -> argparse.ArgumentParser:
     grab_t.add_argument("--name", default="", help="运行名（用于 discoveries 目录命名）")
     _add_batch_pipeline_args(grab_t)
 
+    ck = sub.add_parser(
+        "cookie-refresh",
+        help="从已登录浏览器刷新 cookie.txt（OpenCLI 桥接：document.cookie 合并；缺 SESSDATA 时自动弹扫码页补全）",
+    )
+    ck.add_argument("--cookies", default="cookie.txt")
+    ck.add_argument("--qr", action="store_true", help="直接走扫码流程（首次设置或 SESSDATA 已失效时）")
+    ck.add_argument("--no-backup", action="store_true", help="不备份旧 cookie.txt")
+    ck.add_argument("--proxy", default=None)
+
     repair = sub.add_parser(
         "repair",
         help="修复库内缺口：就地补转写（有音频缺转写的目录）并重写 manifest；"
@@ -704,6 +713,84 @@ def _grab_hot_cmd(args: argparse.Namespace) -> int:
     return report.exit_code()
 
 
+def _cookie_refresh_cmd(args: argparse.Namespace) -> int:
+    """cookie.txt supply chain: browser cookies + (auto) QR login for SESSDATA."""
+    from bilibili_opencli import bridge
+    from bilibili_opencli.cookies import (
+        browser_cookies,
+        merge_cookies,
+        qr_login_flow,
+        read_existing,
+        validate_login,
+        write_netscape,
+    )
+
+    if not bridge.available():
+        _print_utf8(
+            "[OPENCLI] 未检测到 opencli（cookie-refresh 依赖它读取浏览器）。"
+            "安装：npm install -g @jackwener/opencli 并保持浏览器扩展在线；"
+            "或沿用浏览器扩展手动导出 cookie.txt。"
+        )
+        return 2
+
+    cookie_path = Path(args.cookies)
+    existing = read_existing(cookie_path)
+    _print_utf8(f"[COOKIE] 现有文件: {cookie_path}（{len(existing)} 项）")
+
+    # Tier 1: live browser cookies (non-HttpOnly) merged over the existing file
+    try:
+        fresh = browser_cookies()
+    except bridge.BridgeError as e:
+        _print_utf8(f"[COOKIE] 浏览器 cookie 获取失败：{e}")
+        fresh = {}
+    _print_utf8(f"[COOKIE] 浏览器会话: {len(fresh)} 项（SESSDATA 为 HttpOnly，document.cookie 不可见）")
+    merged = merge_cookies(existing, fresh)
+
+    need_qr = bool(args.qr) or "SESSDATA" not in merged
+    if not need_qr:
+        bak = write_netscape(cookie_path, merged, backup=not args.no_backup)
+        ok = validate_login(cookie_path, args.proxy)
+        if ok:
+            _print_utf8(f"[OK] cookie.txt 已刷新并验证登录有效（{len(merged)} 项，SESSDATA 沿用现有值）")
+            if bak:
+                _print_utf8(f"[BACKUP] 旧文件 -> {bak.name}")
+            return 0
+        if ok is None:
+            # The nav check itself failed (network etc.) — inconclusive, not
+            # stale. Never trigger the QR flow on an inconclusive check.
+            _print_utf8("[WARN] 登录校验未能完成（网络原因？）——文件已写好，稍后可用 doctor 或重跑验证")
+            if bak:
+                _print_utf8(f"[BACKUP] 旧文件 -> {bak.name}")
+            return 0
+        _print_utf8("[WARN] 合并后登录校验未通过——现有 SESSDATA 可能已失效，转入扫码流程")
+
+    # Tier 2: pure-Python QR login (no browser) — the successful poll
+    # response body is the only automatic SESSDATA source.
+    _print_utf8("[QR] 正在生成登录二维码（窗口会自动弹出）……")
+    header = "; ".join(f"{k}={v}" for k, v in merged.items())
+    try:
+        qr = qr_login_flow(header or None, log=lambda m: _print_utf8(m))
+    except Exception as e:
+        _print_utf8(f"[FAIL] 扫码流程异常：{e}")
+        return 1
+    if not qr:
+        _print_utf8(
+            "[FAIL] 未捕获到扫码登录（超时或未扫）。兜底：用浏览器扩展（Get cookies.txt）导出覆盖 cookie.txt，"
+            "然后重跑本命令做日常刷新。"
+        )
+        return 1
+    merged = merge_cookies(merged, qr)
+    bak = write_netscape(cookie_path, merged, backup=not args.no_backup)
+    ok = validate_login(cookie_path, args.proxy)
+    if ok:
+        _print_utf8(f"[OK] cookie.txt 已通过扫码刷新并验证登录有效（{len(merged)} 项，含新 SESSDATA）")
+        if bak:
+            _print_utf8(f"[BACKUP] 旧文件 -> {bak.name}")
+        return 0
+    _print_utf8("[WARN] 已写入但登录校验未通过；请重跑或检查网络后重试")
+    return 1
+
+
 def _grab_uploader_cmd(args: argparse.Namespace) -> int:
     if bool(args.seed_bvid) == bool(args.mid):
         _print_utf8("请指定 --seed-bvid 或 --mid（二选一）")
@@ -837,6 +924,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(_grab_search_cmd(args))
     if args.cmd == "grab-hot":
         sys.exit(_grab_hot_cmd(args))
+    if args.cmd == "cookie-refresh":
+        sys.exit(_cookie_refresh_cmd(args))
     if args.cmd == "repair":
         sys.exit(_repair_cmd(args))
     if args.cmd == "search":

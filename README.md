@@ -76,8 +76,9 @@ Full walkthrough (topics, snapshots, PBP, catalogs, category navigation, FAQ): *
 [OpenCLI](https://www.npmjs.com/package/@jackwener/opencli) is an **optional** subprocess dependency (like yt-dlp) that adds capabilities the pipeline lacks via its browser-session channel. Everything degrades gracefully when it is missing.
 
 - `grab-hot [--source hot|ranking]` — hot/ranking **discovery head** feeding the same batch engine (`--require-any/--require-all` title filters, all batch flags apply).
+- `cookie-refresh` — **cookie supply chain, no more extension-export dance**: merges the logged-in browser's cookies (via OpenCLI `document.cookie`), and when SESSDATA is missing/stale it renders a QR code (pure Python, no browser) and completes the ticket redemption hop itself — verified live end-to-end 2026-09-20 (scan → poll → crossDomain Set-Cookie → nav validation).
 - `scripts/backfill_comments.py` — post-hoc **comments backfill** through the official API (incl. 楼中楼 via `--deep N`) for videos whose `comments.txt` is missing/empty; provenance in `json/comments_opencli.json`, manifest rewritten. Zero-comment videos are classified as `EMPTY_RESULT` (normal outcome), never faked.
-- Library API: `bilibili_opencli.bridge` (`available()` / `chart()` / `comments()` / `summary()`).
+- Library API: `bilibili_opencli.bridge` (`available()` / `chart()` / `comments()` / `summary()`) and `bilibili_opencli.cookies` (`qr_login_flow()` / `write_netscape()` / `validate_login()`).
 
 ## Cookie & access matrix
 

@@ -16,6 +16,7 @@ htmlcov/
 # Runtime data (private, never commit)
 cookie.txt
 *.cookie.txt
+cookie.txt.bak-*
 library/
 output/
 discoveries/

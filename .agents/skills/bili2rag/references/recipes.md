@@ -97,7 +97,14 @@ python scripts\backfill_comments.py --library-root library --deep 3
 
 实况参考（2026-09-20）：库内 10 条空评论 → 1 条真实回填成功（BV1YmYT6FEk1），9 条经原始 API count 验证为**真零评论**（适配器返回 EMPTY_RESULT 退出码 66 = 无数据，不是失败）。
 
-更多桥接潜力（未实现，按需做进系统）：`opencli bilibili summary` 做零成本价值预筛（大纲≠全文）、cookie 供应链（浏览器会话→cookie.txt）、个人维度发现（history/following）。
+# 3) cookie 供给链（-352 的一键根治）
+python -m bilibili_get cookie-refresh
+# Tier1: 合并浏览器 24 项 cookie（document.cookie；SESSDATA 为 HttpOnly 不可见）
+# Tier2: SESSDATA 缺失/失效时自动弹二维码图片 → 用户扫码 → poll 成功 →
+#        Python 兑换 crossDomain ticket（Set-Cookie 拿全套）→ 写盘 + nav 验证
+# 2026-09-20 全链路实测：旧 SESSDATA 失效（nav -101）→ 扫码 → 新 SESSDATA → 搜索接口复活
+
+更多桥接潜力（未实现，按需做进系统）：`opencli bilibili summary` 做零成本价值预筛（大纲≠全文）、个人维度发现（history/following）。
 
 ## 环境 & 规模事实（2026-09 时点）
 

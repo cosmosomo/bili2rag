@@ -46,6 +46,7 @@ v0.2.2 起这些全是默认行为，直接享受，不要绕开、不要写旁�
 | 修 partial（有音频缺转写） | `python -m bilibili_get repair --library-root library --asr-device cuda --asr-compute float16` |
 | 重抓缺音频/失败条目 | repair 会输出 `targets_repair.txt` + 现成 grab-targets 命令；unavailable 重试加 `--include-unavailable` |
 | 评论回填（楼中楼，需 OpenCLI） | `python scripts\backfill_comments.py --library-root library --dry-run` 先看计划，`--deep 3` 抓楼中楼 |
+| cookie 供给（免手动导出） | `python -m bilibili_get cookie-refresh`：合并浏览器 cookie；SESSDATA 缺失/失效时自动弹二维码（扫码一次即全套） |
 | 主题指针索引（不复制大文件） | `python scripts\topic_collect.py --topic-name "主题" --targets-file .\t.txt ...` |
 | 分类导航浏览 | `python scripts\build_uploader_catalog.py --library-root library` + `python scripts\make_library_nav.py` |
 
@@ -54,8 +55,9 @@ v0.2.2 起这些全是默认行为，直接享受，不要绕开、不要写旁�
 ## Cookie
 
 - 位置：仓库根 `cookie.txt`（Netscape 或单行 Header 格式，必须含 `SESSDATA`）
+- **首选供给方式**：`python -m bilibili_get cookie-refresh`（需 OpenCLI）——Tier1 零接触合并浏览器 24 项 cookie；SESSDATA（HttpOnly，浏览器读不到）缺失或失效时自动走纯 Python 二维码流程：图片弹窗 → 用户扫码 → poll 成功 → crossDomain ticket 兑换 Set-Cookie → 全套写入 + nav 验证（2026-09-20 实测通过）
 - **失效症状：space/搜索接口报误导性的 `-352` "风控"错误**。工具启动会自动预检：`run` 打 `[COOKIE WARN]` 继续，搜索/发现类命令直接中止
-- 处理：请用户在浏览器重新登录导出并覆盖 `cookie.txt`，别去"绕风控"——那不是风控
+- 处理顺序：先跑 cookie-refresh（绝大多数情况一条命令解决）；OpenCLI 不可用时才用浏览器扩展手动导出
 - 不需要 cookie 的：公开视频 run、ASR、导出、doctor、repair
 
 ## 长批量后台运行模式

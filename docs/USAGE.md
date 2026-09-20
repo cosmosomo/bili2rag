@@ -68,6 +68,7 @@ library/_exports/txt/
 
 要点：
 - 保存为项目根目录 `cookie.txt`，支持 Netscape / 单行 Header 两种格式（详见 `cookie.txt.example`）
+- **推荐入口（装了 OpenCLI 时）**：`python -m bilibili_get cookie-refresh` —— 零接触合并浏览器 cookie；SESSDATA 缺失/失效时自动弹二维码（纯 Python QR 流程：扫码 → poll → crossDomain ticket 兑换 Set-Cookie），扫一次即得全套
 - 公开视频、ASR、导出、doctor **不需要** cookie；space 发现/搜索**必须要有效** `SESSDATA`
 - cookie 失效时 space 类接口报误导性的 `-352`；工具启动会自动预检并提示
 

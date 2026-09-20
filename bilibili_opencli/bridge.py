@@ -54,13 +54,17 @@ def _exe() -> Optional[str]:
     return shutil.which("opencli")
 
 
-def _run(args: List[str], *, timeout: float = _DEFAULT_TIMEOUT) -> Any:
+def _run(args: List[str], *, timeout: float = _DEFAULT_TIMEOUT, fmt_json: bool = False) -> Any:
+    """Run one opencli command. `fmt_json` appends the adapter-level `-f json`
+    flag — the browser channel does NOT accept it (and already outputs JSON)."""
     exe = _exe()
     if exe is None:
         raise BridgeError(
             "opencli 不在 PATH（安装：npm install -g @jackwener/opencli，且需浏览器扩展在线）"
         )
-    cmd = [exe, *args, "-f", "json"]
+    cmd = [exe, *args]
+    if fmt_json:
+        cmd += ["-f", "json"]
     try:
         p = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except FileNotFoundError as e:
@@ -120,7 +124,7 @@ def chart(source: str = "hot", limit: int = 50) -> List[Dict[str, Any]]:
     """hot / ranking discovery. Returns items with a guaranteed `bvid` key."""
     if source not in ("hot", "ranking"):
         raise ValueError(f"source 必须是 hot|ranking，收到 {source!r}")
-    items = _normalize_list(_run(["bilibili", source]), what=source)
+    items = _normalize_list(_run(["bilibili", source], fmt_json=True), what=source)
     out: List[Dict[str, Any]] = []
     for it in items[: max(0, int(limit))]:
         bvid = _extract_bvid(it)
@@ -141,13 +145,61 @@ def comments(bvid: str, *, parent: Optional[str] = None, limit: int = 0) -> List
     args = ["bilibili", "comments", bvid]
     if parent:
         args += ["--parent", str(parent)]
-    items = _normalize_list(_run(args), what="comments")
+    items = _normalize_list(_run(args, fmt_json=True), what="comments")
     return items[: int(limit)] if limit and int(limit) > 0 else items
 
 
 def summary(bvid: str) -> List[Dict[str, Any]]:
     """Official AI summary: outline entries with timestamps (大纲，不是全文)."""
-    return _normalize_list(_run(["bilibili", "summary", bvid]), what="summary")
+    return _normalize_list(_run(["bilibili", "summary", bvid], fmt_json=True), what="summary")
+
+
+# ---------- browser channel (generic, for the cookie supply chain) ----------
+
+def _run_text(args: List[str], *, timeout: float = _DEFAULT_TIMEOUT) -> str:
+    """Run one opencli command and return raw stdout (browser `eval` emits
+    plain text, not JSON)."""
+    exe = _exe()
+    if exe is None:
+        raise BridgeError(
+            "opencli 不在 PATH（安装：npm install -g @jackwener/opencli，且需浏览器扩展在线）"
+        )
+    try:
+        p = subprocess.run([exe, *args], capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise BridgeError(f"opencli 超时（>{timeout}s）: {' '.join(args)}") from e
+    out = p.stdout.decode("utf-8", errors="replace").strip()
+    if p.returncode != 0:
+        err = p.stderr.decode("utf-8", errors="replace").strip()
+        raise BridgeError(f"opencli 退出码 {p.returncode}: {err[:300] or out[:300]}")
+    return out
+
+
+def browser_open(session: str, url: str, *, foreground: bool = False) -> Any:
+    return _run(["browser", session, "open", url, "--window", "foreground" if foreground else "background"])
+
+
+
+def browser_eval(session: str, js: str) -> str:
+    """Evaluate JS in the page context; returns raw text (quotes stripped).
+    NOTE: HttpOnly cookies (SESSDATA) are invisible to document.cookie —
+    see cookies.qr_login_cookies."""
+    return _run_text(["browser", session, "eval", js]).strip('"')
+
+
+def browser_network(session: str, since: str = "30s", detail: Optional[str] = None) -> Any:
+    """Captured network entries (or one full body via detail=<key>)."""
+    args = ["browser", session, "network", "--since", since]
+    if detail:
+        args += ["--detail", detail]
+    return _run(args)
+
+
+def browser_close(session: str) -> None:
+    try:
+        _run(["browser", session, "close"])
+    except BridgeError:
+        pass  # closing a dead session is fine
 
 
 def fetch_timestamp() -> str:

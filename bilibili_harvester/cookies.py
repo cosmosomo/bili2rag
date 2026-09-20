@@ -85,7 +85,8 @@ def check_login_state(cookie_header: Optional[str], *, proxy: Optional[str] = No
 
 
 STALE_COOKIE_HINT = (
-    "cookie 已失效（SESSDATA 过期）：请用浏览器重新登录 bilibili.com 后导出 Cookie 覆盖 cookie.txt。"
+    "cookie 已失效（SESSDATA 过期）：先试 `python -m bilibili_get cookie-refresh`（从已登录浏览器自动刷新，"
+    "装了 OpenCLI 时可用）；或用浏览器重新登录 bilibili.com 后导出 Cookie 覆盖 cookie.txt。"
     "失效期间：公开视频仍可抓取，但 space 发现/搜索等登录接口会返回 -352 风控错误（极具误导性）。"
 )
 
