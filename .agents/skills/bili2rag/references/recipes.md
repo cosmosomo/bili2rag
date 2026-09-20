@@ -95,7 +95,7 @@ python scripts\backfill_comments.py --library-root library --dry-run   # 先看�
 python scripts\backfill_comments.py --library-root library --deep 3
 ```
 
-实况参考（2026-09-20）：库内 10 条空评论 → 1 条真实回填成功（BV1YmYT6FEk1），9 条经原始 API count 验证为**真零评论**（适配器返回 EMPTY_RESULT 退出码 66 = 无数据，不是失败）。
+实况参考（2026-09）：一轮实测中部分视频真实回填成功，其余经原始 API count 验证为**真零评论**（适配器返回 EMPTY_RESULT 退出码 66 = 无数据，不是失败）。
 
 # 3) cookie 供给链（-352 的一键根治）
 python -m bilibili_get cookie-refresh
@@ -108,7 +108,7 @@ python -m bilibili_get cookie-refresh
 
 ## 环境 & 规模事实（2026-09 时点）
 
-- 库：40 UP / 358 条视频；GPU CUDA 可用；whisper 模型 auto（cuda→small / cpu→base）
+- GPU（CUDA）实测可用；whisper 模型 auto（cuda→small / cpu→base）
 - 转写速度参考：whisper-base float16 ≈ 15-25x 实时；CC 旁路条目零 GPU
 - 每条视频子进程固定开销 ~3-5s（进程隔离保护项，已知不修）
 - 已知挂起优化（用户未拍板）：aria2c 多连接下载（网络层 2-5x）
