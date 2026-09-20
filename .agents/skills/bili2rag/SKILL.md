@@ -49,6 +49,7 @@ v0.2.2 起这些全是默认行为，直接享受，不要绕开、不要写旁�
 | cookie 供给（免手动导出） | `python -m bilibili_get cookie-refresh`：合并浏览器 cookie；SESSDATA 缺失/失效时自动弹二维码（扫码一次即全套） |
 | 主题指针索引（不复制大文件） | `python scripts\topic_collect.py --topic-name "主题" --targets-file .\t.txt ...` |
 | 分类导航浏览 | `python scripts\build_uploader_catalog.py --library-root library` + `python scripts\make_library_nav.py` |
+| 系统出 bug / 要改 skill | 读 `references/maintenance.md`：bug 分类 → 修复 → 验证三关 → **双仓上传协议** |
 
 完整旗标、默认值、参数语义：读 `references/commands.md`。端到端场景（专题调研全流程、增量刷新、修复闭环、故障排查）：读 `references/recipes.md`。
 
@@ -92,5 +93,7 @@ Get-Content "discoveries\mybatch_out.log" -Tail 10   # 随时查进度
 
 - `references/commands.md` — 全命令 + 旗标参考
 - `references/recipes.md` — 工作流配方与故障排查
+- `references/search-methodology.md` — 搜索与调研方法论（关键词矩阵 / 两轮过滤 / 三级价值预筛 / 分桶收敛 / 已知坑）
 - `references/architecture.md` — 架构分层、包职责、保护清单（改代码时读）
+- `references/maintenance.md` — **bug 修复手册 + 修复后上传协议**（含集成层已知陷阱账本、B站接口改版应对法、双仓同步步骤）
 - `scripts/merge_collection.py` — 跨 UP 多批语料的分桶 32k 合集合并
