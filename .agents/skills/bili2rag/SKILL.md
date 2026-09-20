@@ -39,11 +39,13 @@ v0.2.2 起这些全是默认行为，直接享受，不要绕开、不要写旁�
 | 抓单条视频（采集→转写→归档） | `python -m bilibili_get run --url BVxxx --cookies cookie.txt --asr-device cuda --asr-compute float16 --prune-output` |
 | 抓某 UP 的新投稿 | `python -m bilibili_get grab-uploader --seed-bvid BVxxx --cookies cookie.txt --asr-device cuda --asr-compute float16 --prune-output`；周期增量加 `--since-days 7` |
 | 关键词调研一个专题（一条命令） | `python -m bilibili_get grab-search --keyword "关键词" --require-any 词1,词2 --min-play 1000 --min-seconds 120 ...批量旗标` |
+| 热门/排行榜批量（需 OpenCLI） | `python -m bilibili_get grab-hot --source hot|ranking --discover-limit 30 --require-any "词" ...批量旗标` |
 | 按清单批量 | `python -m bilibili_get grab-targets --targets-file .\targets.txt --name 运行名 --cookies cookie.txt --asr-device cuda --asr-compute float16 --prune-output` |
 | 转写合并成 txt 全集/32k 分卷 | 单 UP 或单主题：`python scripts\export_txt_bundle.py --uploader "UP名" --with-header --parts-cap 32000`；跨 UP 多批分桶合集：用本 skill 的 `scripts/merge_collection.py` |
 | 库体检 | `python scripts\doctor.py --library-root library`（加 `--write-targets` 生成待修清单） |
 | 修 partial（有音频缺转写） | `python -m bilibili_get repair --library-root library --asr-device cuda --asr-compute float16` |
 | 重抓缺音频/失败条目 | repair 会输出 `targets_repair.txt` + 现成 grab-targets 命令；unavailable 重试加 `--include-unavailable` |
+| 评论回填（楼中楼，需 OpenCLI） | `python scripts\backfill_comments.py --library-root library --dry-run` 先看计划，`--deep 3` 抓楼中楼 |
 | 主题指针索引（不复制大文件） | `python scripts\topic_collect.py --topic-name "主题" --targets-file .\t.txt ...` |
 | 分类导航浏览 | `python scripts\build_uploader_catalog.py --library-root library` + `python scripts\make_library_nav.py` |
 

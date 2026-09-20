@@ -71,6 +71,14 @@ Full walkthrough (topics, snapshots, PBP, catalogs, category navigation, FAQ): *
 - **Deferred ASR sweep** — batch fetching runs without inline ASR; one single-model sweep afterwards transcribes everything (model loads once per batch, not per video).
 - **Parallel fetch** — 2 concurrent per-video subprocesses by default (`--fetch-workers`, keep ≤3 for risk-control friendliness).
 
+## Optional OpenCLI bridge (v0.3, `feat/opencli-bridge`)
+
+[OpenCLI](https://www.npmjs.com/package/@jackwener/opencli) is an **optional** subprocess dependency (like yt-dlp) that adds capabilities the pipeline lacks via its browser-session channel. Everything degrades gracefully when it is missing.
+
+- `grab-hot [--source hot|ranking]` — hot/ranking **discovery head** feeding the same batch engine (`--require-any/--require-all` title filters, all batch flags apply).
+- `scripts/backfill_comments.py` — post-hoc **comments backfill** through the official API (incl. 楼中楼 via `--deep N`) for videos whose `comments.txt` is missing/empty; provenance in `json/comments_opencli.json`, manifest rewritten. Zero-comment videos are classified as `EMPTY_RESULT` (normal outcome), never faked.
+- Library API: `bilibili_opencli.bridge` (`available()` / `chart()` / `comments()` / `summary()`).
+
 ## Cookie & access matrix
 
 Not every feature needs a cookie. Check before troubleshooting:
@@ -105,6 +113,7 @@ Not every feature needs a cookie. Check before troubleshooting:
 | `bilibili_harvester` | yt-dlp based harvesting: metadata, audio/video/subtitles, danmaku, comments snapshot; signed playurl fallback |
 | `bilibili_asr` | faster-whisper transcription, per-page aggregation, Simplified-Chinese normalization |
 | `bilibili_search` | Search & uploader discovery: WBI signing, space listing with `-352` backoff, session/cookie handling |
+| `bilibili_opencli` | Optional OpenCLI bridge: hot/ranking discovery, official-API comments (楼中楼), AI summaries |
 | `bilibili_enrich` | Optional enrichment: PBP (high-energy bar), videoshot snapshots |
 | `bilibili_library` | Export to readable dirs, NFO/manifest (sha256), naming, completion predicate, txt bundles |
 

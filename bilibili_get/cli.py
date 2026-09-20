@@ -165,6 +165,16 @@ def build_parser() -> argparse.ArgumentParser:
     grab_s.add_argument("--require-any", default="", help="标题至少包含其一的词（逗号分隔）")
     _add_batch_pipeline_args(grab_s)
 
+    grab_hot = sub.add_parser(
+        "grab-hot",
+        help="热门/排行榜发现头（OpenCLI 桥接，可选依赖）→ 引擎批量抓取",
+    )
+    grab_hot.add_argument("--source", choices=["hot", "ranking"], default="hot", help="发现源（默认 hot）")
+    grab_hot.add_argument("--discover-limit", type=int, default=50, help="取榜单前 N 条（0=不限制）")
+    grab_hot.add_argument("--require-all", default="", help="标题必须包含的词（逗号分隔）")
+    grab_hot.add_argument("--require-any", default="", help="标题至少包含其一的词（逗号分隔）")
+    _add_batch_pipeline_args(grab_hot)
+
     grab_up = sub.add_parser(
         "grab-uploader",
         help="增量抓取某 UP 主新投稿（space 发现 → 引擎逐条子进程采集）",
@@ -651,6 +661,49 @@ def _grab_search_cmd(args: argparse.Namespace) -> int:
     return report.exit_code()
 
 
+def _grab_hot_cmd(args: argparse.Namespace) -> int:
+    """Hot/ranking discovery head (OpenCLI bridge, optional) -> batch engine."""
+    from bilibili_opencli import bridge
+
+    from .orchestrate import BatchItem, run_batch
+
+    if not bridge.available():
+        _print_utf8(
+            "[OPENCLI] 未检测到 opencli（热门/排行榜发现依赖它）。"
+            "安装：npm install -g @jackwener/opencli 并保持浏览器扩展在线；"
+            "或改用 grab-search / grab-uploader / grab-targets。"
+        )
+        return 2
+    try:
+        chart = bridge.chart(str(args.source), int(args.discover_limit))
+    except bridge.BridgeError as e:
+        _print_utf8(f"[OPENCLI] 榜单获取失败：{e}")
+        return 2
+
+    require_all = [t.strip().lower() for t in args.require_all.split(",") if t.strip()]
+    require_any = [t.strip().lower() for t in args.require_any.split(",") if t.strip()]
+    items: List[BatchItem] = []
+    for it in chart:
+        title = str(it.get("title") or "").strip()
+        low = title.lower()
+        if require_all and not all(t in low for t in require_all):
+            continue
+        if require_any and not any(t in low for t in require_any):
+            continue
+        items.append(BatchItem(bvid=it["bvid"], title=title))
+
+    run_dir = Path(args.out_dir) / f"{_utc_now_compact()}_hot_{args.source}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "targets.txt").write_text(
+        "\n".join(f"【{i.title}】https://www.bilibili.com/video/{i.bvid}" for i in items) + ("\n" if items else ""),
+        encoding="utf-8",
+    )
+    _print_utf8(f"[HOT] source={args.source} hits={len(chart)} kept={len(items)} dir={run_dir}")
+
+    report = run_batch(items, _batch_config_from_args(args, run_dir))
+    return report.exit_code()
+
+
 def _grab_uploader_cmd(args: argparse.Namespace) -> int:
     if bool(args.seed_bvid) == bool(args.mid):
         _print_utf8("请指定 --seed-bvid 或 --mid（二选一）")
@@ -782,6 +835,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(_grab_targets_cmd(args))
     if args.cmd == "grab-search":
         sys.exit(_grab_search_cmd(args))
+    if args.cmd == "grab-hot":
+        sys.exit(_grab_hot_cmd(args))
     if args.cmd == "repair":
         sys.exit(_repair_cmd(args))
     if args.cmd == "search":

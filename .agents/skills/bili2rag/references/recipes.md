@@ -81,6 +81,24 @@ python -m bilibili_get repair --library-root library --asr-device cuda --asr-com
 | 充电专属/会员内容失败 | 外部限制 | 不造假原则：显式失败，标记 unavailable |
 | 评论只有首屏 | 服务端 is_end 截断 | 外部限制，接受 |
 
+## 配方五：OpenCLI 桥接增强（v0.3 feat/opencli-bridge）
+
+OpenCLI 是可选子进程依赖（yt-dlp 同款模式，缺失优雅降级）。两个已落地的桥接点：
+
+```powershell
+# 1) 热门/排行榜批量（bili2rag 原生没有热榜发现头）
+python -m bilibili_get grab-hot --source ranking --discover-limit 30 `
+  --require-any "AI,Agent" --cookies cookie.txt --asr-device cuda --asr-compute float16 --prune-output
+
+# 2) 评论回填（采集侧只有首屏热评；官方接口可拿楼中楼）
+python scripts\backfill_comments.py --library-root library --dry-run   # 先看计划
+python scripts\backfill_comments.py --library-root library --deep 3
+```
+
+实况参考（2026-09-20）：库内 10 条空评论 → 1 条真实回填成功（BV1YmYT6FEk1），9 条经原始 API count 验证为**真零评论**（适配器返回 EMPTY_RESULT 退出码 66 = 无数据，不是失败）。
+
+更多桥接潜力（未实现，按需做进系统）：`opencli bilibili summary` 做零成本价值预筛（大纲≠全文）、cookie 供应链（浏览器会话→cookie.txt）、个人维度发现（history/following）。
+
 ## 环境 & 规模事实（2026-09 时点）
 
 - 库：40 UP / 358 条视频；GPU CUDA 可用；whisper 模型 auto（cuda→small / cpu→base）

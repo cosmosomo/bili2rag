@@ -38,6 +38,17 @@ python -m bilibili_get grab-search --keyword "..."
 - 产物：`discoveries/<ts>_search_<关键词>/targets.txt + report.json`
 - 多关键词调研：跑多次 grab-search，或先多次 `python -m bilibili_search search --keyword X`（旧入口，产出 results.jsonl）再用 `scripts/topic_make_targets_from_discoveries.py` 合并精选
 
+## grab-hot — 热门/排行榜发现头（OpenCLI 桥接，可选依赖）
+
+```
+python -m bilibili_get grab-hot [--source hot|ranking] [--discover-limit 50]
+  [--require-all 词,词] [--require-any 词,词]
+  + 批量旗标（见下）
+```
+
+- 依赖本机 OpenCLI（`npm i -g @jackwener/opencli` + 浏览器扩展在线）；未安装时退出码 2 并给安装提示，不影响其它命令
+- 产物：`discoveries/<ts>_hot_<source>/targets.txt`，随后直接进引擎
+
 ## grab-uploader — 按 UP 增量
 
 ```
@@ -114,6 +125,7 @@ python -m bilibili_get export --all --output-root output --library-root library 
 | 脚本 | 用途 |
 |---|---|
 | `scripts/doctor.py --library-root library [--write-targets]` | 三账体检：库内缺口 ∣ unavailable ∣ output 残留 |
+| `scripts/backfill_comments.py --library-root library [--dry-run] [--deep N] [--force] [--bvid BVx]` | OpenCLI 官方接口评论回填（楼中楼 `--deep`）；EMPTY_RESULT=真零评论；非空 comments.txt 永不覆盖 |
 | `scripts/export_txt_bundle.py --uploader X \| --topic X [--with-header] [--concat-all] [--parts-cap 32000]` | 转写导出全集 txt；`--parts-cap` 按视频边界切 32k 分卷 |
 | `scripts/topic_collect.py --topic-name X --targets-file t.txt` | 主题收集（引擎抓取 + `library/_topics/X/*/pointer.json` 指针索引） |
 | `scripts/topic_make_targets_from_discoveries.py --input discoveries/<run> [--input ...] --out-targets t.txt --profile <档位>` | 多次搜索结果合并去重精选（profiles: philosophy_netizen/philosophy_mixed/management/self_media/self_psych/systems/country_pe） |

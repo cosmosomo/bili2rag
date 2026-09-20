@@ -132,6 +132,31 @@ python -m bilibili_get grab-targets --targets-file .\targets.txt --prune-output 
 - 明确不可得（-404/-403/-87008）→ 自动标 `unavailable`（`library/_ledger/unavailable.jsonl`）。
 - 其它失败 → 记入 `library/_ledger/failures.jsonl`（纯日志）+ 报告 failed 账。
 
+### 4.4 热门/排行榜发现头（可选：OpenCLI 桥接）
+
+`grab-hot` 用本机 OpenCLI（`npm i -g @jackwener/opencli`，浏览器扩展在线）拉热门/排行榜，产出统一 targets 后走同一引擎：
+
+```powershell
+python -m bilibili_get grab-hot --source ranking --discover-limit 30 `
+  --require-any "AI,Agent" `
+  --cookies .\cookie.txt --asr-device cuda --asr-compute float16 --prune-output
+```
+
+未安装 opencli 时命令以退出码 2 中止并给出安装提示（不影响其它命令）。
+
+### 4.5 评论回填（可选：OpenCLI 桥接）
+
+采集侧评论只有首屏热评（服务端截断）；`backfill_comments.py` 用官方接口对库内评论缺失/为空的视频做后置回填（不改主链）：
+
+```powershell
+python scripts\backfill_comments.py --library-root .\library --dry-run   # 先看计划
+python scripts\backfill_comments.py --library-root .\library --deep 3    # 前3条主评抓楼中楼
+```
+
+- 产物：`json/comments_opencli.json`（原始数据+溯源）+ 补写 `comments.txt`（非空文件永不覆盖，除非 `--force`）+ 重写 manifest。
+- 适配器对**零评论视频**返回 `EMPTY_RESULT`（退出码 66）——脚本将其归为"无评论"而非失败（已用原始 API count 验证语义）。
+
+
 ## 5. 主题收集（把不同 UP 的视频归到一个主题目录）
 
 适用场景：你想把“个人IP”这类主题下的多个视频集中浏览，但又不想复制一份音频/转写占空间。
