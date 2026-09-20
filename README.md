@@ -110,6 +110,10 @@ Not every feature needs a cookie. Check before troubleshooting:
 
 Plus `scripts/`: topic collection (engine + pointer post-processing), doctor (library health), catalog & category navigation (`_by_category/` junctions + `INDEX.md`), txt bundle export.
 
+## Bundled agent skill
+
+`.agents/skills/bili2rag/` ships an **agent skill** (SKILL.md + command reference + workflow recipes + a cross-source merge script) so AI coding agents operating this repo get the full operating manual — task→command map, cookie pitfalls (`-352` = stale cookie, not risk control), long-batch background pattern, and the red lines from `docs/DESIGN.md`. Tools that discover `.agents/skills/` pick it up automatically; otherwise just read that SKILL.md.
+
 ## Library layout
 
 ```
